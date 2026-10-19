@@ -19,7 +19,7 @@ jest.mock('../../services/wallet', () => ({
   getWalletBalance: () => mockGetWalletBalance(),
 }));
 
-const STORAGE_KEY = 'boxmeout_wallet_address';
+const STORAGE_KEY = 'bankerchanger_wallet_address';
 
 describe('useWallet', () => {
   beforeEach(() => {

@@ -2,41 +2,48 @@
 
 ## Overview
 
-The ActivityFeed WebSocket endpoint (`/ws`) requires JWT authentication to prevent unauthorized access to real-time market activity data.
+The ActivityFeed WebSocket endpoint (`/ws`) requires JWT authentication via first-message authentication protocol. This prevents JWT tokens from being exposed in server access logs, which would otherwise record query parameters.
 
 ## Authentication Protocol
 
 ### Connection Setup
 
-Include a valid JWT token in the WebSocket upgrade request via query parameter:
+1. **Connect without authentication** — Open a WebSocket connection to the endpoint without any credentials:
 
 ```
-ws://localhost:3001?token=<JWT_TOKEN>
+ws://localhost:3001/
 ```
 
 or for HTTPS:
 
 ```
-wss://example.com?token=<JWT_TOKEN>
+wss://example.com/
+```
+
+2. **Send authentication message within 5 seconds** — After connection opens, send an auth message with your JWT token:
+
+```json
+{
+  "type": "auth",
+  "token": "<JWT_TOKEN>"
+}
 ```
 
 ### Token Requirements
 
 - Must be a valid JWT signed with `JWT_SECRET` (same as used for REST API auth)
-- Token format: `Bearer <token>` is NOT used; pass the raw JWT string
+- Token format: pass the raw JWT string (not `Bearer <token>`)
 - No expiration validation on the server (tokens are validated structurally)
 
 ### Authentication Errors
 
-If authentication fails, the server closes the connection with:
+Connection closes with error codes:
 
-- **Close code:** 4001
-- **Reason:** "Unauthorized"
-
-Common failure reasons:
-- Missing `token` query parameter
-- Invalid JWT signature
-- Malformed token
+| Close Code | Reason | Cause |
+|---|---|---|
+| 4001 | `Authentication timeout` | Auth message not sent within 5 seconds |
+| 4001 | `Expected auth message` | First message was not an auth message |
+| 4001 | `Invalid token` | JWT signature verification failed |
 
 ## Example: Client Connection
 
@@ -50,27 +57,45 @@ const loginRes = await fetch('/api/auth/login', {
 });
 const { accessToken } = await loginRes.json();
 
-// Connect with token
-const ws = new WebSocket(`ws://localhost:3001?token=${accessToken}`);
+// Connect to WebSocket (without token in URL)
+const ws = new WebSocket('ws://localhost:3001/');
 
 ws.addEventListener('open', () => {
-  // Subscribe to market activity
+  // Send authentication message
   ws.send(JSON.stringify({
-    type: 'subscribe_activity',
-    marketId: 'market-123',
+    type: 'auth',
+    token: accessToken,
   }));
 });
 
 ws.addEventListener('message', (event) => {
-  const activity = JSON.parse(event.data);
-  console.log('Activity:', activity);
+  const message = JSON.parse(event.data);
+  
+  // Handle activity events (received after successful auth and subscription)
+  if (message.type === 'trade' || message.type === 'dispute' || message.type === 'resolved') {
+    console.log('Activity:', message);
+  }
 });
 
 ws.addEventListener('close', (event) => {
   if (event.code === 4001) {
-    console.error('Authentication failed');
+    console.error('Authentication failed:', event.reason);
   }
 });
+
+ws.addEventListener('error', (event) => {
+  console.error('WebSocket error:', event);
+});
+
+// After connection opens and authentication succeeds, subscribe to markets
+function subscribeToMarket(marketId: string) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'subscribe_activity',
+      marketId,
+    }));
+  }
+}
 ```
 
 ## Message Protocol
@@ -115,13 +140,15 @@ Event types:
 
 ## Security Considerations
 
+- **Token in Access Logs:** Query parameters are NOT logged; the token is only sent as a WebSocket frame, not visible to reverse proxies or load balancers
 - **Token Reuse:** Tokens are not revoked; use short expiration in the REST API (`JWT_EXPIRES_IN`)
-- **Query Parameter:** JWT in URL may be logged by proxies/load balancers; consider HTTPS in production
-- **No Per-Message Auth:** Once connected, no further auth checks per message (use connection-level auth)
+- **5-Second Deadline:** Clients must authenticate within 5 seconds or the connection is closed (prevents resource exhaustion from unauthenticated connections)
+- **No Per-Message Auth:** Once authenticated, no further auth checks per message (connection-level auth only)
 
 ## Deployment Checklist
 
 - [ ] Ensure `JWT_SECRET` is set in production
 - [ ] Use `wss://` (WebSocket Secure) in production
 - [ ] Monitor for 4001 close codes to detect auth failures
-- [ ] Validate token expiration on client side for graceful reconnect
+- [ ] Client code updated to send auth message instead of token in URL
+- [ ] Update client reconnection logic to handle 5-second auth deadline

@@ -1,5 +1,5 @@
 # ============================================================
-# BOXMEOUT — Root .gitignore
+# BANKERCHANGER — Root .gitignore
 # Covers: Node.js (backend / indexer), Next.js (frontend),
 #         Rust / Soroban (contracts), Docker, tooling
 # ============================================================
@@ -75,6 +75,10 @@ playwright/.cache/
 *.snap
 frontend/e2e/snapshots/
 frontend/e2e/test-results/
+
+# ─── Soroban test artifacts ──────────────────────────────────
+**/test_snapshots/
+**/proptest-regressions/
 
 # ─── Playwright artifacts ────────────────────────────────────
 blob-report/

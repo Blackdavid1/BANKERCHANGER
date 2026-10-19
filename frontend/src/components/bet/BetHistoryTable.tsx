@@ -1,7 +1,7 @@
 'use client';
 
 // ============================================================
-// BOXMEOUT — BetHistoryTable Component
+// BANKERCHANGER — BetHistoryTable Component
 // ============================================================
 
 import { useState, useMemo } from 'react';

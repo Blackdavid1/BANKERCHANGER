@@ -9,14 +9,15 @@ jobs:
   e2e:
     name: Full Bet Flow (Soroban local node)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     services:
       postgres:
         image: postgres:15-alpine
         env:
-          POSTGRES_USER: boxmeout
-          POSTGRES_PASSWORD: boxmeout
-          POSTGRES_DB: boxmeout
+          POSTGRES_USER: bankerchanger
+          POSTGRES_PASSWORD: bankerchanger
+          POSTGRES_DB: bankerchanger
         ports:
           - 5432:5432
       redis:
@@ -50,7 +51,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/Cargo.lock') }}
 
       - name: Install stellar-cli
-        run: cargo install --locked stellar-cli --features opt
+        run: cargo install --locked stellar-cli --version 26.1.0 --features opt
 
       # ── Start local Soroban node ──────────────────────────────────────────
       - name: Start local Soroban standalone node
@@ -111,9 +112,9 @@ jobs:
       - name: Start backend
         working-directory: backend
         env:
-          DATABASE_URL: postgresql://boxmeout:boxmeout@localhost:5432/boxmeout
+          DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
           REDIS_URL: redis://localhost:6379
-          JWT_SECRET: e2e-test-secret
+          JWT_SECRET: e2e-test-secret-for-ci-0123456789abcdef
           PORT: 3001
         run: node dist/index.js &
 
@@ -159,7 +160,15 @@ jobs:
           BASE_URL: http://localhost:3000
           SOROBAN_TEST_PUBLIC_KEY: ${{ steps.keypair.outputs.public_key }}
           SOROBAN_MARKET_CONTRACT_ID: ${{ steps.deploy_market.outputs.market_id }}
+          DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
         run: npx playwright test e2e/soroban-bet-flow.spec.ts
+
+      - name: Clean up E2E database records
+        if: always()
+        working-directory: frontend
+        env:
+          DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
+        run: npm run e2e:cleanup
 
       - name: Upload Playwright report
         if: always()

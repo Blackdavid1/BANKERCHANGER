@@ -5,6 +5,7 @@ import {
   deleteExpiredResetTokens,
   softDeleteOldNotifications,
   archiveFailedDistributions,
+  cleanupOldBlockchainEvents,
 } from '../services/cron.service';
 import { withDistributedLock } from '../utils/distributedLock';
 
@@ -50,5 +51,15 @@ export function startCleanupCron(): void {
 
   cron.schedule('0 3 * * 0', cleanupDistributionsWithLock);
 
-  logger.info('Cleanup cron jobs scheduled (sessions/tokens: hourly, notifications: daily, distributions: weekly)');
+  // Daily at 04:00 — delete processed blockchain_events past retention
+  // Set DRY_RUN=true to log counts without deleting anything.
+  // Lock TTL: 2 hours (longer than daily interval margin)
+  const cleanupBlockchainEventsWithLock = withDistributedLock('cleanupBlockchainEvents', 2 * 60 * 60, async () => {
+    const count = await cleanupOldBlockchainEvents();
+    logger.info({ count, dryRun: process.env.DRY_RUN === 'true' }, 'cleanupBlockchainEvents: completed');
+  });
+
+  cron.schedule('0 4 * * *', cleanupBlockchainEventsWithLock);
+
+  logger.info('Cleanup cron jobs scheduled (sessions/tokens: hourly, notifications: daily, distributions/blockchain-events: weekly/daily)');
 }

@@ -1,16 +1,388 @@
-# BoxMeOut Operational Runbook
+# BANKERCHANGER Operational Runbook
 
 ## Overview
 
-This runbook provides step-by-step procedures for responding to common production incidents in the BoxMeOut platform. Each incident type includes observable symptoms, diagnostic procedures, resolution steps, and escalation protocols.
+This runbook provides step-by-step procedures for responding to common production incidents in the BANKERCHANGER platform. Each incident type includes observable symptoms, diagnostic procedures, resolution steps, and escalation protocols.
 
 **Table of Contents:**
-1. [Oracle Failures & Unresolved Markets](#oracle-failures--unresolved-markets)
-2. [Treasury Withdrawal Limits Exceeded](#treasury-withdrawal-limits-exceeded)
-3. [Contract Pause Events](#contract-pause-events)
-4. [High Dispute Volumes](#high-dispute-volumes)
-5. [RPC Node Outages](#rpc-node-outages)
-6. [Quick Reference: CLI Commands](#quick-reference-cli-commands)
+1. [Database Backup & Disaster Recovery](#database-backup--disaster-recovery)
+2. [Oracle Failures & Unresolved Markets](#oracle-failures--unresolved-markets)
+3. [Oracle Resolution Failure (Sustained) — User Funds Locked](#oracle-resolution-failure-sustained--user-funds-locked)
+4. [Treasury Withdrawal Limits Exceeded](#treasury-withdrawal-limits-exceeded)
+5. [Contract Pause Events](#contract-pause-events)
+6. [High Dispute Volumes](#high-dispute-volumes)
+7. [RPC Node Outages](#rpc-node-outages)
+8. [Quick Reference: CLI Commands](#quick-reference-cli-commands)
+
+---
+
+## Database Backup & Disaster Recovery
+
+### Overview
+
+BANKERCHANGER maintains automated daily backups of the PostgreSQL database with encryption and redundant storage in AWS S3. This section covers backup operations, restore procedures, and disaster recovery scenarios.
+
+**Backup Strategy:**
+- **Frequency:** Daily automated backups at 2:00 AM UTC
+- **Retention:** 30-day rolling window (configurable)
+- **Encryption:** AES-256 at rest using OpenSSL
+- **Storage:** AWS S3 with versioning and lifecycle policies
+- **Verification:** Weekly integrity checks (Sundays 3:00 AM UTC)
+- **Cleanup:** Monthly retention enforcement (1st of month 4:00 AM UTC)
+
+### Backup Status & Monitoring
+
+#### Check Last Backup
+
+```bash
+# List all available backups
+cd /app && ./backend/scripts/manage-backups.sh --list
+
+# Show storage statistics
+cd /app && ./backend/scripts/manage-backups.sh --stats
+
+# Generate full backup report
+cd /app && ./backend/scripts/manage-backups.sh --report
+```
+
+#### Verify Backup Integrity
+
+Run weekly to ensure all backups are accessible and not corrupted:
+
+```bash
+# Verify all backups
+cd /app && ./backend/scripts/manage-backups.sh --verify-integrity
+
+# Expected output: ✓ VALID for each backup
+```
+
+#### Monitor Backup Logs
+
+```bash
+# Daily backup log
+tail -f /var/log/backups/cron-backup.log
+
+# Verification log
+tail -f /var/log/backups/cron-verify.log
+
+# Cleanup log
+tail -f /var/log/backups/cron-cleanup.log
+```
+
+### Disaster Recovery Procedures
+
+#### Scenario 1: Restore Most Recent Backup
+
+Use this procedure to restore from the latest available backup (typical recovery scenario).
+
+**Prerequisites:**
+- Access to AWS account with S3 access
+- PostgreSQL client tools installed
+- Encryption key available (`$BACKUP_ENCRYPTION_KEY_FILE`)
+
+**Steps:**
+
+1. **List available backups:**
+   ```bash
+   cd /app && ./backend/scripts/manage-backups.sh --list
+   ```
+
+2. **Restore latest backup to temporary database:**
+   ```bash
+   # Restore to test database first (non-destructive)
+   cd /app && ./backend/scripts/restore-db.sh \
+     --latest \
+     --target-db bankerchanger_restore_test
+   ```
+
+3. **Verify restored database:**
+   ```bash
+   # Connect to restored database
+   psql postgresql://bankerchanger:password@localhost:5432/bankerchanger_restore_test
+
+   # Run validation queries
+   SELECT COUNT(*) FROM markets;
+   SELECT COUNT(*) FROM bets;
+   SELECT COUNT(*) FROM users;
+   ```
+
+4. **Swap databases (if validation passes):**
+   ```bash
+   # Create backup of current production database
+   pg_dump postgresql://bankerchanger:password@localhost:5432/bankerchanger \
+     > /backups/prod_backup_$(date +%Y%m%d_%H%M%S).sql
+
+   # Drop current database
+   psql postgresql://bankerchanger:password@localhost:5432 \
+     -c "DROP DATABASE bankerchanger;"
+
+   # Rename restored database
+   psql postgresql://bankerchanger:password@localhost:5432 \
+     -c "ALTER DATABASE bankerchanger_restore_test RENAME TO bankerchanger;"
+
+   # Restart application
+   systemctl restart bankerchanger-backend
+   ```
+
+#### Scenario 2: Restore Specific Backup by Timestamp
+
+Use this to restore from a known point in time.
+
+1. **Find backup timestamp:**
+   ```bash
+   # View all backups with timestamps
+   cd /app && ./backend/scripts/manage-backups.sh --list
+
+   # Example output:
+   # 20240115_020000  123.5MB  bankerchanger  2024-01-15 02:00:00
+   # 20240114_020000  122.8MB  bankerchanger  2024-01-14 02:00:00
+   ```
+
+2. **Restore specific backup:**
+   ```bash
+   cd /app && ./backend/scripts/restore-db.sh \
+     --backup-timestamp 20240115_020000 \
+     --target-db bankerchanger_restore_test
+   ```
+
+3. **Follow verification and swap steps from Scenario 1**
+
+#### Scenario 3: Full Database Loss (Critical Recovery)
+
+Perform complete database restoration from backup in case of data corruption or total failure.
+
+1. **Stop application immediately:**
+   ```bash
+   systemctl stop bankerchanger-backend
+   systemctl stop bankerchanger-indexer
+   ```
+
+2. **Verify PostgreSQL is running:**
+   ```bash
+   systemctl status postgresql
+   # If not running, start it:
+   systemctl start postgresql
+   ```
+
+3. **Drop corrupted database (if exists):**
+   ```bash
+   psql postgresql://postgres:password@localhost:5432 \
+     -c "DROP DATABASE IF EXISTS bankerchanger;"
+   ```
+
+4. **Restore from latest backup:**
+   ```bash
+   cd /app && ./backend/scripts/restore-db.sh --latest
+
+   # This will restore to default database: bankerchanger
+   ```
+
+5. **Verify database integrity:**
+   ```bash
+   # Connect and run schema validation
+   psql postgresql://bankerchanger:password@localhost:5432/bankerchanger \
+     -c "SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = 'public';"
+
+   # Should return table count > 10
+   ```
+
+6. **Restart application:**
+   ```bash
+   systemctl start bankerchanger-backend
+   systemctl start bankerchanger-indexer
+
+   # Monitor startup
+   journalctl -u bankerchanger-backend -f
+   ```
+
+7. **Verify connectivity:**
+   ```bash
+   # Health check
+   curl -s http://localhost:3001/api/health | jq '.'
+
+   # Check recent data
+   curl -s http://localhost:3001/api/markets?limit=5 | jq '.markets[].title'
+   ```
+
+### Backup Encryption & Key Management
+
+#### Initialize Encryption Key
+
+Generate a new AES-256 encryption key (do this once, then secure the key):
+
+```bash
+# Generate and store locally
+cd /app && ./backend/scripts/generate-backup-key.sh \
+  --key-file /secure/backups/encryption.key
+
+# Or store in AWS Secrets Manager
+cd /app && ./backend/scripts/generate-backup-key.sh --to-secrets-manager
+```
+
+#### Encryption Key Location
+
+Configure where backup scripts find the encryption key:
+
+```bash
+# Option 1: Local file (secure, restricted permissions)
+export BACKUP_ENCRYPTION_KEY_FILE=/secure/backups/encryption.key
+
+# Option 2: AWS Secrets Manager (recommended for production)
+# Script automatically fetches from Secrets Manager if key file not found
+export BACKUP_KEY_SECRET_NAME=bankerchanger/db-backup-key
+```
+
+#### Key Rotation
+
+To rotate encryption keys (every 90 days recommended):
+
+```bash
+# 1. Generate new key
+cd /app && ./backend/scripts/generate-backup-key.sh --key-file /secure/backups/encryption.key.new
+
+# 2. Update environment variable
+export BACKUP_ENCRYPTION_KEY_FILE=/secure/backups/encryption.key.new
+
+# 3. Verify next backup uses new key
+# 4. Securely destroy old key after verification period
+# shred -vfz /secure/backups/encryption.key
+```
+
+### Manual Backup Operations
+
+#### Create On-Demand Backup
+
+Trigger a backup manually outside the scheduled cron job:
+
+```bash
+# Ensure environment variables are set
+export DATABASE_URL=postgresql://bankerchanger:password@localhost:5432/bankerchanger
+export AWS_S3_BACKUP_BUCKET=my-backups-bucket
+export AWS_REGION=us-east-1
+export BACKUP_ENCRYPTION_KEY_FILE=/secure/backups/encryption.key
+
+# Run backup
+cd /app && ./backend/scripts/backup-db.sh
+
+# Monitor progress in log
+tail -f /var/log/backups/backup-$(date +%Y%m).log
+```
+
+#### Cleanup Old Backups Manually
+
+Force cleanup of backups older than retention period:
+
+```bash
+# Run cleanup (respects BACKUP_RETENTION_DAYS)
+cd /app && ./backend/scripts/manage-backups.sh --cleanup
+
+# Show what would be deleted (verify retention date)
+export RETENTION_DAYS=30
+cutoff_date=$(date -d "$RETENTION_DAYS days ago" +%Y-%m-%d)
+echo "Will delete backups before: $cutoff_date"
+```
+
+### Cron Job Setup & Configuration
+
+#### Install Automated Cron Jobs
+
+Set up daily backups, weekly verification, and monthly cleanup:
+
+```bash
+# Install cron jobs (requires sudo)
+sudo ./backend/scripts/backup-cron-setup.sh \
+  --user backup \
+  --app-dir /app
+
+# Verify installation
+crontab -u backup -l | grep BANKERCHANGER_DB_BACKUP
+```
+
+#### Cron Schedule
+
+| Job | Schedule | Time (UTC) | Purpose |
+|-----|----------|-----------|---------|
+| Daily Backup | 0 2 * * * | 2:00 AM | Create encrypted backup |
+| Weekly Verify | 0 3 * * 0 | 3:00 AM Sunday | Integrity check all backups |
+| Monthly Cleanup | 0 4 1 * * | 4:00 AM 1st | Delete backups >30 days old |
+
+#### Remove Cron Jobs
+
+If decommissioning backups:
+
+```bash
+# Remove all backup cron jobs
+sudo ./backend/scripts/backup-cron-setup.sh --remove
+```
+
+### Troubleshooting
+
+#### Backup Failed
+
+```bash
+# Check error in logs
+tail -100 /var/log/backups/backup-$(date +%Y%m).log
+
+# Common issues:
+# 1. Missing AWS credentials
+aws sts get-caller-identity
+
+# 2. S3 bucket not accessible
+aws s3 ls s3://$AWS_S3_BACKUP_BUCKET --region $AWS_REGION
+
+# 3. Database connection failed
+psql $DATABASE_URL -c "SELECT 1"
+
+# 4. Encryption key missing
+ls -la $BACKUP_ENCRYPTION_KEY_FILE
+```
+
+#### Restore Failed
+
+```bash
+# Check restore log
+tail -100 /var/log/backups/restore-*.log
+
+# Verify S3 backup exists
+aws s3 ls "s3://$AWS_S3_BACKUP_BUCKET/db-backups/" --region $AWS_REGION --recursive
+
+# Verify encryption key
+cat $BACKUP_ENCRYPTION_KEY_FILE
+
+# Test decryption manually
+openssl enc -aes-256-cbc -d -in backup.sql.gz.enc -pass file:$BACKUP_ENCRYPTION_KEY_FILE | gunzip > test.sql
+```
+
+#### S3 Upload Fails
+
+```bash
+# Verify AWS credentials
+aws sts get-caller-identity
+
+# Check S3 bucket policy allows uploads
+aws s3api get-bucket-policy --bucket $AWS_S3_BACKUP_BUCKET
+
+# Verify S3 bucket exists and is in correct region
+aws s3api head-bucket --bucket $AWS_S3_BACKUP_BUCKET --region $AWS_REGION
+```
+
+### Escalation Protocol
+
+| Level | Timeframe | Symptoms | Action |
+|-------|-----------|----------|--------|
+| **Level 1** | - | Backup missed | Check cron logs; verify S3/encryption access; re-run manually |
+| **Level 2** | 6 hours | Multiple backups failed | Notify ops; verify database connectivity; check AWS service status |
+| **Level 3** | 24 hours | Total backup failure + data access needed | Activate disaster recovery; consider point-in-time restore; notify users if needed |
+
+### Prevention & Best Practices
+
+- **Test restores monthly:** Verify restore procedures work before crisis
+- **Key escrow:** Store backup keys in separate secure location
+- **Monitor backup age:** Alert if latest backup >24 hours old
+- **Verify integrity:** Run weekly verification to catch corruption early
+- **Document RTO/RPO:** Backup strategy supports <1 hour RPO, <4 hour RTO
+- **Encrypt keys:** Never commit encryption keys to version control
+- **Audit access:** Log all restore operations for compliance
 
 ---
 
@@ -84,6 +456,217 @@ stellar contract invoke \
 - **Level 1 (0-30 min):** Monitor and contact oracle provider support
 - **Level 2 (30-60 min):** Notify platform administrators, prepare market force-resolution
 - **Level 3 (>1 hour):** Invoke emergency pause, initiate user communications, request oracle emergency support
+
+---
+
+## Oracle Resolution Failure (Sustained) — User Funds Locked
+
+### Observable Symptoms
+
+- Multiple markets remain in "locked" state for >24 hours past `scheduled_at`
+- Oracle repeatedly returns errors on submission (`/api/oracle` 5xx or timeout on every attempt)
+- User funds are locked in unresolved markets — users cannot claim winnings
+- Backend cron logs show repeated failures: `autoResolution cron: oracle submit failed for market {id}`
+- Dispute count spikes as users flag unresolved markets
+- Monitoring alerts fire for `locked_markets_past_due > 0` for extended period
+
+### Detection
+
+**Step 1: Identify stuck markets**
+```bash
+# Database query: markets past resolution time still locked
+psql $DATABASE_URL <<SQL
+SELECT id, title, scheduled_at, status, outcome,
+       EXTRACT(EPOCH FROM (NOW() - scheduled_at)) / 3600 AS hours_past_due
+FROM markets
+WHERE status = 'locked'
+  AND scheduled_at < NOW() - INTERVAL '1 hour'
+ORDER BY scheduled_at ASC;
+SQL
+```
+
+**Step 2: Confirm oracle is unreachable**
+```bash
+# Test oracle health endpoint
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/api/oracle/health
+
+# Check Horizon for recent oracle account activity
+curl -s "https://horizon-testnet.stellar.org/accounts/{ORACLE_ADDRESS}/operations?limit=5&order=desc" | jq '.records[].type'
+```
+
+**Step 3: Estimate locked fund impact**
+```bash
+# Total user funds locked in unresolved markets
+psql $DATABASE_URL <<SQL
+SELECT COUNT(DISTINCT user_id) AS affected_users,
+       SUM(amount) / 10000000.0 AS total_locked_xlm
+FROM bets
+WHERE market_id IN (
+  SELECT id FROM markets
+  WHERE status = 'locked' AND scheduled_at < NOW() - INTERVAL '1 hour'
+);
+SQL
+```
+
+### Manual Resolution Steps
+
+**Option A: Admin Force Resolution (Recommended — when outcome is known)**
+
+Use when the boxing match result is publicly available but oracle failed to submit.
+
+```bash
+# 1. Verify the correct outcome from an authoritative source
+#    (official boxing commission, major sports sites, event promoter)
+
+# 2. Force resolve the market on-chain
+stellar contract invoke \
+    --id {MARKET_FACTORY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network mainnet \
+    -- admin_force_resolve \
+    --market-id {market_id} \
+    --outcome {fighter_a|fighter_b|draw|no_contest}
+
+# 3. Verify resolution on-chain
+stellar contract invoke \
+    --id {MARKET_FACTORY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network mainnet \
+    -- query_market \
+    --market-id {market_id} | jq '.outcome'
+
+# 4. Verify payouts are enabled (status changes from "locked" to "resolved")
+curl -s http://localhost:3001/api/markets/{market_id} | jq '.status'
+```
+
+**Option B: Market Cancellation (Fallback — when outcome cannot be verified)**
+
+Use when the event was cancelled, postponed indefinitely, or outcome is disputed beyond resolution.
+
+```bash
+# 1. Cancel the market and refund all bettors
+stellar contract invoke \
+    --id {MARKET_FACTORY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network mainnet \
+    -- admin_cancel_market \
+    --market-id {market_id} \
+    --reason "oracle_unavailable"
+
+# 2. Verify cancellation
+stellar contract invoke \
+    --id {MARKET_FACTORY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network mainnet \
+    -- query_market \
+    --market-id {market_id} | jq '.status'
+# Expected: "cancelled"
+
+# 3. Confirm treasury has sufficient balance for refunds
+stellar contract invoke \
+    --id {TREASURY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network mainnet \
+    -- get_treasury_state | jq '.balance_stroops'
+```
+
+**Option C: Batch Resolution Script (for many stuck markets)**
+
+```bash
+# Run the batch resolution helper (if available)
+node scripts/batch-resolve-markets.js \
+    --network mainnet \
+    --outcome-source manual \
+    --markets-file /tmp/stuck_markets.json
+
+# Or manually iterate:
+psql $DATABASE_URL -t -A -c \
+  "SELECT id FROM markets WHERE status = 'locked' AND scheduled_at < NOW() - INTERVAL '24 hours';" \
+  | while read -r market_id; do
+    echo "Resolving market: $market_id"
+    # Force resolve or cancel each market
+  done
+```
+
+### Admin Override Commands
+
+| Command | Purpose | Risk Level |
+|---------|---------|-----------|
+| `admin_force_resolve` | Resolve a single market to a specific outcome | Medium — verify outcome first |
+| `admin_cancel_market` | Cancel market and trigger refunds | High — funds returned but user trust impacted |
+| `admin_pause` | Halt all new bets and market creation | Critical — freezes entire platform |
+| `admin_unpause` | Resume platform operations after fix | Critical — unpause only after verifying oracle recovery |
+
+**Before using any admin override:**
+1. Document the reason in the admin audit log
+2. Take a database snapshot of affected markets and bets
+3. Notify the team in the incident channel
+4. Prepare a user communication draft
+
+### Oracle Recovery & Failover
+
+**Step 1: Attempt oracle recovery**
+```bash
+# Restart oracle service if self-hosted
+ssh user@oracle-host "systemctl restart boxmeout-oracle"
+
+# Check oracle logs
+ssh user@oracle-host "journalctl -u boxmeout-oracle -n 100 --no-pager"
+```
+
+**Step 2: Switch to backup oracle (if configured)**
+```bash
+# Update oracle address in environment
+export ORACLE_ADDRESS={BACKUP_ORACLE_ADDRESS}
+
+# Restart backend to pick up new oracle config
+systemctl restart boxmeout-backend
+```
+
+**Step 3: Verify oracle is submitting**
+```bash
+# Watch for new oracle submissions
+watch -n 30 "curl -s http://localhost:3001/api/markets?status=resolved&limit=5 | jq '.markets[].resolvedAt'"
+```
+
+### Escalation Protocol
+
+| Level | Timeframe | Action |
+|-------|-----------|--------|
+| **Level 1** | 0-2 hours | Monitor oracle health; check if issue is transient RPC/node related |
+| **Level 2** | 2-6 hours | Notify platform administrators; begin manual resolution for time-critical markets; draft user notification |
+| **Level 3** | 6-24 hours | Pause new market creation via `admin_pause`; resolve all overdue markets manually; publish incident post to users |
+| **Level 4** | >24 hours | Executive escalation; consider switching oracle provider; publish post-mortem; assess user compensation if needed |
+
+### User Communication Template
+
+```
+Subject: [BoxMeOut] Market Resolution Delay — {market_title}
+
+We are experiencing a delay in resolving the market for "{market_title}".
+
+What happened: The oracle service responsible for submitting event results
+has encountered an issue.
+
+What we're doing:
+- [If known outcome] We are manually resolving this market with the verified result.
+- [If unknown] We are working to obtain the verified result and will resolve shortly.
+
+Your funds remain safe on-chain. Payouts will be processed as soon as the
+market is resolved. No action is required from you.
+
+We will provide an update within {timeframe}.
+
+— BoxMeOut Team
+```
+
+### Prevention
+
+- **Oracle redundancy:** Configure at least 2 oracle addresses in `ORACLE_ADDRESSES`
+- **Health monitoring:** Set up uptime checks on oracle endpoint with alerting
+- **Auto-resolution cron:** Ensure `autoResolution.cron.ts` is running and logs are monitored
+- **Scheduled market lock:** Verify markets are locked before `scheduled_at` via `autoLockCron`
+- **Runbook drills:** Practice oracle failure scenarios quarterly
 
 ---
 

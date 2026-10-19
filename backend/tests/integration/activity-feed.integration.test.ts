@@ -4,9 +4,15 @@
 import http from 'http';
 import jwt from 'jsonwebtoken';
 import { WebSocket } from 'ws';
-import { ActivityFeed, type ActivityEvent } from '../../src/websocket/realtime';
+import {
+  ActivityFeed,
+  broadcastMarketResolved,
+  initActivityFeed,
+  type ActivityEvent,
+} from '../../src/websocket/realtime';
 
-const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
+const JWT_SECRET = process.env.JWT_SECRET ?? 'test-jwt-secret-for-websocket-0123456789';
+process.env.JWT_SECRET ??= JWT_SECRET;
 
 function generateTestToken(): string {
   return jwt.sign({ sub: 'test-user', type: 'access' }, JWT_SECRET);
@@ -39,7 +45,7 @@ describe('ActivityFeed integration', () => {
 
   beforeAll((done) => {
     server = http.createServer();
-    feed = new ActivityFeed(server);
+    feed = initActivityFeed(server);
     server.listen(0, () => {
       port = (server.address() as { port: number }).port;
       done();
@@ -53,9 +59,13 @@ describe('ActivityFeed integration', () => {
 
   it('delivers a trade event to a subscribed client after buying shares', async () => {
     const token = generateTestToken();
-    const ws = new WebSocket(`ws://localhost:${port}?token=${token}`);
+    const ws = new WebSocket(`ws://localhost:${port}`);
 
     await new Promise<void>((resolve) => ws.once('open', resolve));
+
+    // Authenticate with token
+    ws.send(JSON.stringify({ type: 'auth', token }));
+    await new Promise((r) => setImmediate(r));
 
     // Subscribe to market activity
     ws.send(JSON.stringify({ type: 'subscribe_activity', marketId: 'market-1' }));
@@ -83,10 +93,47 @@ describe('ActivityFeed integration', () => {
     ws.close();
   });
 
+  it('broadcasts market resolution payloads to every subscribed client', async () => {
+    const clients = [
+      new WebSocket(`ws://localhost:${port}`),
+      new WebSocket(`ws://localhost:${port}`),
+    ];
+
+    try {
+      await Promise.all(clients.map((ws) => new Promise<void>((resolve) => ws.once('open', resolve))));
+      for (const ws of clients) ws.send(JSON.stringify({ type: 'auth', token: generateTestToken() }));
+      await new Promise((r) => setImmediate(r));
+      for (const ws of clients) {
+        ws.send(JSON.stringify({ type: 'subscribe_activity', marketId: 'market-resolved' }));
+      }
+      await new Promise((r) => setImmediate(r));
+
+      const messagesPromise = Promise.all(clients.map((ws) => waitForMessage(ws)));
+      broadcastMarketResolved('market-resolved', 'fighter_a', 16333);
+      const messages = await messagesPromise;
+
+      for (const message of messages) {
+        expect(message).toMatchObject({
+          type: 'market:resolved',
+          marketId: 'market-resolved',
+          outcome: 'fighter_a',
+          winner_odds: 16333,
+        });
+        expect(new Date(message.timestamp).toISOString()).toBe(message.timestamp);
+      }
+    } finally {
+      for (const ws of clients) ws.close();
+    }
+  });
+
   it('does not deliver events to unsubscribed markets', async () => {
     const token = generateTestToken();
-    const ws = new WebSocket(`ws://localhost:${port}?token=${token}`);
+    const ws = new WebSocket(`ws://localhost:${port}`);
     await new Promise<void>((resolve) => ws.once('open', resolve));
+
+    // Authenticate with token
+    ws.send(JSON.stringify({ type: 'auth', token }));
+    await new Promise((r) => setImmediate(r));
 
     // Subscribe to a different market
     ws.send(JSON.stringify({ type: 'subscribe_activity', marketId: 'market-other' }));
@@ -105,8 +152,12 @@ describe('ActivityFeed integration', () => {
 
   it('rate-limits to 20 events/sec per market', async () => {
     const token = generateTestToken();
-    const ws = new WebSocket(`ws://localhost:${port}?token=${token}`);
+    const ws = new WebSocket(`ws://localhost:${port}`);
     await new Promise<void>((resolve) => ws.once('open', resolve));
+
+    // Authenticate with token
+    ws.send(JSON.stringify({ type: 'auth', token }));
+    await new Promise((r) => setImmediate(r));
 
     ws.send(JSON.stringify({ type: 'subscribe_activity', marketId: 'market-rl' }));
     await new Promise((r) => setImmediate(r));
@@ -129,13 +180,18 @@ describe('ActivityFeed integration', () => {
     const token = generateTestToken();
     // Create and disconnect 1000 subscriptions
     for (let i = 0; i < 1000; i++) {
-      const ws = new WebSocket(`ws://localhost:${port}?token=${token}`);
+      const ws = new WebSocket(`ws://localhost:${port}`);
       await new Promise<void>((resolve) => ws.once('open', resolve));
+      ws.send(JSON.stringify({ type: 'auth', token }));
+      await new Promise((r) => setImmediate(r));
       ws.send(JSON.stringify({ type: 'subscribe_activity', marketId: `market-${i}` }));
       await new Promise((r) => setImmediate(r));
       ws.close();
       await new Promise((r) => setImmediate(r));
     }
+
+    // Wait for all connections to fully close
+    await new Promise((r) => setTimeout(r, 100));
 
     // All subscription sets should be cleaned up
     expect(feed['subscriptions'].size).toBe(0);
@@ -143,18 +199,32 @@ describe('ActivityFeed integration', () => {
 
   it('rejects connections without valid JWT token', async () => {
     const ws = new WebSocket(`ws://localhost:${port}`);
-    const close = waitForClose(ws);
+    const close = waitForClose(ws, 6000); // 6 second timeout for 5 second auth deadline
     const { code, reason } = await close;
 
     expect(code).toBe(4001);
-    expect(reason).toBe('Unauthorized');
-  });
+    expect(reason).toBe('Authentication timeout');
+  }, 10000); // 10 second timeout for this test
 
   it('rejects connections with invalid JWT token', async () => {
-    const ws = new WebSocket(`ws://localhost:${port}?token=invalid-token`);
+    const ws = new WebSocket(`ws://localhost:${port}`);
+    await new Promise<void>((resolve) => ws.once('open', resolve));
+    ws.send(JSON.stringify({ type: 'auth', token: 'invalid-token' }));
     const close = waitForClose(ws);
     const { code, reason } = await close;
 
     expect(code).toBe(4001);
-    expect(reason).toBe('Unauthorized');
+    expect(reason).toBe('Invalid token');
   });
+
+  it('rejects subscription messages before authentication', async () => {
+    const ws = new WebSocket(`ws://localhost:${port}`);
+    await new Promise<void>((resolve) => ws.once('open', resolve));
+    ws.send(JSON.stringify({ type: 'subscribe_activity', marketId: 'market-1' }));
+    const close = waitForClose(ws);
+    const { code, reason } = await close;
+
+    expect(code).toBe(4001);
+    expect(reason).toBe('Expected auth message');
+  });
+});

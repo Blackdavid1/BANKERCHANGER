@@ -48,7 +48,7 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const APP_NAME = process.env.APP_NAME ?? 'BoxMeOut';
+const APP_NAME = process.env.APP_NAME ?? 'BANKERCHANGER';
 
 function lastSendMailCall() {
   const calls = mockSendMail.mock.calls;

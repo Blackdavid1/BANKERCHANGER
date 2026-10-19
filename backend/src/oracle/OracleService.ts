@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — Oracle Service
+// BANKERCHANGER — Oracle Service
 // Responsible for fetching fight results from external sources
 // and submitting them to Market contracts on Stellar.
 // ============================================================
@@ -60,27 +60,50 @@ async function sendAlert(market_id: string, match_id: string): Promise<void> {
   }
 
   const alertSentKey = `${ALERT_SENT_KEY_PREFIX}${market_id}`;
+  const payload = {
+    title: 'Oracle Resolution Failure Alert',
+    message: `Market ${market_id} (match ${match_id}) has failed to resolve ${FAILURE_THRESHOLD} times consecutively. User funds may be locked.`,
+    market_id,
+    match_id,
+    timestamp: new Date().toISOString(),
+  };
 
-  try {
-    const payload = {
-      title: 'Oracle Resolution Failure Alert',
-      message: `Market ${market_id} (match ${match_id}) has failed to resolve ${FAILURE_THRESHOLD} times consecutively. User funds may be locked.`,
-      market_id,
-      match_id,
-      timestamp: new Date().toISOString(),
-    };
+  const MAX_RETRIES = 3;
+  let lastError: unknown = null;
 
-    await fetch(webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
 
-    await redis.set(alertSentKey, '1', 'EX', 7 * 24 * 60 * 60);
-    logger.info({ market_id, match_id }, 'sendAlert: Alert sent successfully');
-  } catch (err) {
-    logger.error({ err, market_id, match_id }, 'sendAlert: Failed to send alert');
+      if (!response.ok) {
+        throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
+      }
+
+      await redis.set(alertSentKey, '1', 'EX', 7 * 24 * 60 * 60);
+      logger.info({ market_id, match_id, attempt }, 'sendAlert: Alert sent successfully');
+      return;
+    } catch (err) {
+      lastError = err;
+      logger.warn(
+        { err, market_id, match_id, attempt, maxRetries: MAX_RETRIES },
+        `sendAlert: Attempt ${attempt}/${MAX_RETRIES} failed`,
+      );
+
+      if (attempt < MAX_RETRIES) {
+        const backoffMs = Math.pow(2, attempt - 1) * 1000;
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      }
+    }
   }
+
+  logger.fatal(
+    { err: lastError, market_id, match_id, retries: MAX_RETRIES },
+    'sendAlert: CRITICAL - All retry attempts to send alert webhook failed',
+  );
 }
 
 // Shape of a single fight entry returned by the external boxing API
@@ -188,6 +211,43 @@ function buildSignedMessage(match_id: string, outcomeIndex: number, reportedAtMs
   ]);
 }
 
+export function verifyOracleSignature(
+  report: Pick<OracleReport, 'match_id' | 'outcome' | 'reported_at' | 'oracle_address'>,
+  signature: string | undefined,
+  publicKey: string,
+): boolean {
+  try {
+    if (!signature || !/^[0-9a-fA-F]{128}$/.test(signature) || !/^[0-9a-fA-F]{64}$/.test(publicKey)) {
+      return false;
+    }
+
+    const outcomeIndex = OUTCOME_INDEX[report.outcome as FightOutcome];
+    const reportedAtMs = new Date(report.reported_at).getTime();
+    if (outcomeIndex === undefined || !Number.isFinite(reportedAtMs)) return false;
+
+    const publicKeyBytes = Buffer.from(publicKey, 'hex');
+    if (!Keypair.fromPublicKey(report.oracle_address).rawPublicKey().equals(publicKeyBytes)) return false;
+
+    const pubKeyObj = createPublicKey({
+      key: Buffer.concat([
+        Buffer.from('302a300506032b6570032100', 'hex'),
+        publicKeyBytes,
+      ]),
+      format: 'der',
+      type: 'spki',
+    });
+
+    return cryptoVerify(
+      null,
+      buildSignedMessage(report.match_id, outcomeIndex, BigInt(reportedAtMs)),
+      pubKeyObj,
+      Buffer.from(signature, 'hex'),
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Builds an xdr.ScVal representation of an OracleReport struct.
  *
@@ -251,6 +311,8 @@ export async function fetchExternalFightResult(match_id: string): Promise<FightO
 
   try {
     const url = `${baseUrl}/fights?fight_id=${encodeURIComponent(match_id)}`;
+    // AbortSignal.timeout bounds this call so a hanging upstream API can't
+    // hold the auto-resolution cron open indefinitely for this market.
     const response = await fetch(url, {
       headers: {
         Accept: 'application/json',
@@ -695,30 +757,9 @@ export async function submitFightResult(
  */
 export async function verifyOracleReport(report: OracleReport): Promise<boolean> {
   try {
-    // 1. Reconstruct signed message using XDR encoding
-    const outcomeIndex = OUTCOME_INDEX[report.outcome as FightOutcome];
-    if (outcomeIndex === undefined) return false;
-
-    const reportedAtMs = BigInt(new Date(report.reported_at).getTime());
-    const message = buildSignedMessage(report.match_id, outcomeIndex, reportedAtMs);
-
-    // 2. Verify Ed25519 signature
     const rawPubKey = Keypair.fromPublicKey(report.oracle_address).rawPublicKey();
-    const pubKeyObj = createPublicKey({
-      key: Buffer.concat([
-        // Ed25519 SubjectPublicKeyInfo DER prefix (12 bytes)
-        Buffer.from('302a300506032b6570032100', 'hex'),
-        rawPubKey,
-      ]),
-      format: 'der',
-      type: 'spki',
-    });
+    if (!verifyOracleSignature(report, report.signature, rawPubKey.toString('hex'))) return false;
 
-    const sigBuf = Buffer.from(report.signature, 'hex');
-    const sigValid = cryptoVerify(null, message, pubKeyObj, sigBuf);
-    if (!sigValid) return false;
-
-    // 3. Check whitelist
     const whitelist = await getOracleWhitelist();
     return whitelist.has(report.oracle_address);
   } catch {

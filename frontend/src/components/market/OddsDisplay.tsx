@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — OddsDisplay Component
+// BANKERCHANGER — OddsDisplay Component
 // Shows parimutuel multipliers and implied probabilities for all three outcomes.
 // ============================================================
 

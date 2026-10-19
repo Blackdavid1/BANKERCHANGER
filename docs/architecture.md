@@ -1,6 +1,6 @@
-# BoxMeOut — Architecture Documentation
+# BANKERCHANGER — Architecture Documentation
 
-This document describes the high-level system architecture, data flows, and key interaction patterns of the BoxMeOut decentralized boxing prediction market.
+This document describes the high-level system architecture, data flows, and key interaction patterns of the BANKERCHANGER decentralized boxing prediction market.
 
 ## Table of Contents
 
@@ -14,7 +14,7 @@ This document describes the high-level system architecture, data flows, and key 
 
 ## System Overview
 
-BoxMeOut is a full-stack decentralized application consisting of four main layers:
+BANKERCHANGER is a full-stack decentralized application consisting of four main layers:
 
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
@@ -151,6 +151,90 @@ sequenceDiagram
 ```
 
 ## Oracle Resolution Flow
+
+### Oracle Consensus Mechanism
+
+Oracles are whitelisted Stellar accounts that submit match outcome reports to the backend. The system uses a **2-of-3 consensus model** to prevent any single oracle from unilaterally resolving a market.
+
+#### How Consensus Works
+
+1. **Report Submission**: After a boxing match concludes, each whitelisted oracle independently fetches the official result and submits a signed report via `POST /api/oracle/report`. The report includes the market ID, declared outcome (`fighter_a`, `fighter_b`, or `draw`), and a cryptographic signature.
+
+2. **Report Storage**: Each report is stored in the `oracle_reports` table with the oracle's public key, reported outcome, signature, and timestamp. Reports are immutable once stored.
+
+3. **Consensus Check**: After storing each new report, the backend queries all reports for that market. If **2 out of 3** whitelisted oracles have submitted reports with the **same outcome**, consensus is reached.
+
+4. **On-Chain Resolution**: Once consensus is achieved, the backend invokes the `resolve()` method on the market's Soroban contract. The contract:
+   - Validates the resolver is the factory contract (authorized caller)
+   - Sets the market outcome to the consensus value
+   - Unlocks the claim function for winning bettors
+   - Emits a `MarketResolved` event
+
+5. **Late Reports**: If a third oracle submits a report after resolution, the report is still stored for audit purposes but does not trigger any further action.
+
+6. **No Consensus**: If oracles submit conflicting reports (e.g., 1 for `fighter_a`, 1 for `fighter_b`, 1 for `draw`), the market remains in `locked` status. An automated retry mechanism (`autoResolution.cron.ts`) will re-attempt resolution periodically, giving oracles time to converge.
+
+#### Consensus Flow Diagram
+
+```mermaid
+sequenceDiagram
+    participant O1 as Oracle 1
+    participant O2 as Oracle 2
+    participant O3 as Oracle 3
+    participant API as Backend API
+    participant DB as PostgreSQL
+    participant MC as Market Contract
+
+    Note over O1,O3: Boxing match concludes
+
+    O1->>API: POST /api/oracle/report (outcome: fighter_a, sig: σ₁)
+    API->>API: Verify oracle is whitelisted
+    API->>API: Verify signature against oracle's public key
+    API->>DB: INSERT oracle_report (oracle=O1, outcome=fighter_a)
+    API->>DB: SELECT reports WHERE market_id = M
+    DB-->>API: [{O1: fighter_a}]
+    Note over API: 1/3 reports — no consensus yet
+    API-->>O1: 200 OK { consensusReached: false }
+
+    O2->>API: POST /api/oracle/report (outcome: fighter_a, sig: σ₂)
+    API->>API: Verify oracle is whitelisted
+    API->>API: Verify signature
+    API->>DB: INSERT oracle_report (oracle=O2, outcome=fighter_a)
+    API->>DB: SELECT reports WHERE market_id = M
+    DB-->>API: [{O1: fighter_a}, {O2: fighter_a}]
+    Note over API: 2/3 agree on fighter_a — CONSENSUS REACHED
+
+    API->>MC: invoke resolve(market_id, fighter_a)
+    MC->>MC: Validate authorized caller
+    MC->>MC: Set market.outcome = fighter_a
+    MC->>MC: Unlock claims for winning side
+    MC->>MC: Emit MarketResolved event
+    MC-->>API: Transaction confirmed
+
+    API->>DB: UPDATE market SET status='resolved', outcome='fighter_a'
+    API->>API: Broadcast via WebSocket
+    API-->>O2: 200 OK { consensusReached: true, txHash: "..." }
+
+    opt Late report (after resolution)
+        O3->>API: POST /api/oracle/report (outcome: fighter_a, sig: σ₃)
+        API->>DB: INSERT oracle_report (already resolved)
+        API-->>O3: 200 OK { alreadyResolved: true }
+    end
+```
+
+#### Oracle Security Model
+
+| Property | Implementation |
+|----------|---------------|
+| **Identity** | Each oracle is identified by a whitelisted Stellar public key |
+| **Authentication** | Reports must carry a valid Ed25519 signature verifiable against the oracle's key |
+| **Authorization** | Only the oracle's registered public key can submit reports on its behalf |
+| **Sybil resistance** | Oracles must be whitelisted by the market factory admin |
+| **Collusion resistance** | 2-of-3 threshold means no single oracle can unilaterally resolve a market |
+| **Non-repudiation** | Signed reports are stored immutably for audit |
+| **Liveness** | Auto-resolution cron re-attempts resolution if oracles fail to converge initially |
+
+### Original Oracle Resolution Sequence
 
 Oracles are whitelisted accounts that submit match outcome reports. Resolution requires 2-of-3 consensus.
 

@@ -20,9 +20,9 @@ jobs:
       postgres:
         image: postgres:15-alpine
         env:
-          POSTGRES_USER: boxmeout
-          POSTGRES_PASSWORD: boxmeout
-          POSTGRES_DB: boxmeout
+          POSTGRES_USER: bankerchanger
+          POSTGRES_PASSWORD: bankerchanger
+          POSTGRES_DB: bankerchanger
         ports:
           - 5432:5432
       redis:
@@ -46,9 +46,21 @@ jobs:
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
 
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        id: cache-node-modules
+        with:
+          path: backend/node_modules
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('backend/package-lock.json') }}
+
       - name: Install dependencies
         working-directory: backend
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
         run: npm ci
+
+      - name: Security Audit - npm HIGH/CRITICAL vulnerabilities
+        working-directory: backend
+        run: npm audit --audit-level=high
 
       - name: Validate OpenAPI spec
         working-directory: backend
@@ -85,7 +97,7 @@ jobs:
         working-directory: backend
         run: npm run drizzle:check
         env:
-          DATABASE_URL: postgresql://boxmeout:boxmeout@localhost:5432/boxmeout
+          DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
 
       - name: Lint
         working-directory: backend
@@ -101,7 +113,14 @@ jobs:
         working-directory: backend
         run: npm test
         env:
-          DATABASE_URL: postgresql://boxmeout:boxmeout@localhost:5432/boxmeout
+          DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
+          REDIS_URL: redis://localhost:6379
+
+      - name: Automated E2E Integration Test Suite
+        working-directory: backend
+        run: npm run test:e2e
+        env:
+          DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
           REDIS_URL: redis://localhost:6379
 
   load-test:
@@ -112,9 +131,9 @@ jobs:
       postgres:
         image: postgres:15-alpine
         env:
-          POSTGRES_USER: boxmeout
-          POSTGRES_PASSWORD: boxmeout
-          POSTGRES_DB: boxmeout
+          POSTGRES_USER: bankerchanger
+          POSTGRES_PASSWORD: bankerchanger
+          POSTGRES_DB: bankerchanger
         ports:
           - 5432:5432
       redis:
@@ -131,8 +150,16 @@ jobs:
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
 
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        id: cache-node-modules
+        with:
+          path: backend/node_modules
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('backend/package-lock.json') }}
+
       - name: Install dependencies
         working-directory: backend
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
         run: npm ci
 
       - name: Start backend server
@@ -141,7 +168,7 @@ jobs:
           npx ts-node-dev --respawn src/index.ts &
           sleep 5
         env:
-          DATABASE_URL: postgresql://boxmeout:boxmeout@localhost:5432/boxmeout
+          DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
           REDIS_URL: redis://localhost:6379
           PORT: 3001
 

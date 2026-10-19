@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — Market Database Model
+// BANKERCHANGER — Market Database Model
 // ORM definition for the markets table.
 // Contributors: do not add business logic here — model only.
 // ============================================================

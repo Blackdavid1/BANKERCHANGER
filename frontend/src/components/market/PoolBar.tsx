@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — PoolBar Component
+// BANKERCHANGER — PoolBar Component
 // Visual representation of pool proportions
 // ============================================================
 

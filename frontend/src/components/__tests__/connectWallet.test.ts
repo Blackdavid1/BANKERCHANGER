@@ -8,7 +8,7 @@ import {
   WalletConnectionError,
 } from '../../services/wallet';
 
-const STORAGE_KEY = 'boxmeout_wallet_address';
+const STORAGE_KEY = 'bankerchanger_wallet_address';
 
 function setWindow(overrides: Record<string, unknown>) {
   Object.assign(window, overrides);

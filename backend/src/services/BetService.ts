@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — Bet Service
+// BANKERCHANGER — Bet Service
 // Business logic for bet operations: recording, fetching, payouts
 // ============================================================
 
@@ -9,6 +9,8 @@ import { cacheDelete, cacheDeletePattern } from './cache.service';
 import { AppError } from '../utils/AppError';
 import { Address, xdr } from '@stellar/stellar-sdk';
 import { invokeContract } from './StellarService';
+import { acquireLock } from '../utils/distributedLock';
+import type { QueryResultRow } from 'pg';
 
 export interface BetWithMarket extends Bet {
   market_id: string;
@@ -19,7 +21,8 @@ export interface BetWithMarket extends Bet {
 
 export interface FetchBetsResult {
   bets: BetWithMarket[];
-  total: number;
+  total?: number;
+  nextCursor: string | null;
 }
 
 export interface ProjectedPayout {
@@ -29,12 +32,21 @@ export interface ProjectedPayout {
 
 /**
  * Records a bet triggered by a BetPlaced blockchain event.
- * 
+ *
+ * Concurrency safety — two-layer guard (issue #26):
+ *   1. Redis distributed lock  (`bet:lock:<market_id>`, TTL 10 s) — prevents
+ *      concurrent bet processing at the application/service level.
+ *   2. SELECT … FOR UPDATE inside the DB transaction — serialises access to
+ *      the market row at the database level, ensuring each bet reads a
+ *      consistent, up-to-date market state before writing.
+ *
  * Steps:
  *   1. Validate inputs
- *   2. Insert Bet record with tx_hash as unique key (idempotent)
- *   3. Update User.total_wagered and User.total_bets
- *   4. Invalidate Redis cache for the market
+ *   2. Acquire Redis distributed lock (retry ×3, 100 ms apart)
+ *   3. Begin DB transaction; SELECT market row FOR UPDATE
+ *   4. Insert Bet record with tx_hash as unique key (idempotent)
+ *   5. Invalidate Redis cache for the market
+ *   6. Commit; release lock
  */
 export async function recordBet(
   market_id: string,
@@ -55,27 +67,83 @@ export async function recordBet(
 
   const amount_xlm = Number(amount) / 10_000_000;
 
-  const result = await pool.query(
-    `INSERT INTO bets (market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (tx_hash) DO NOTHING
-     RETURNING *`,
-    [market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence],
-  );
+  // ── Layer 1: Redis distributed lock ───────────────────────────────────────
+  // Prevents two concurrent requests from processing bets for the same market
+  // simultaneously at the application layer.
+  const LOCK_KEY = `bet:lock:${market_id}`;
+  const LOCK_TTL_SECS = 10;
+  const MAX_LOCK_RETRIES = 3;
+  const LOCK_RETRY_DELAY_MS = 100;
+
+  let lock = null;
+  for (let attempt = 0; attempt < MAX_LOCK_RETRIES; attempt++) {
+    lock = await acquireLock({ key: LOCK_KEY, ttl: LOCK_TTL_SECS });
+    if (lock) break;
+    if (attempt < MAX_LOCK_RETRIES - 1) {
+      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_DELAY_MS));
+    }
+  }
+
+  if (!lock) {
+    throw AppError.conflict('Service temporarily busy, please retry');
+  }
 
   let bet: any;
-  if (result.rows.length > 0) {
-    bet = result.rows[0];
-    // Invalidate cache only on new insert
-    await cacheDeletePattern(`market:${market_id}*`);
-    await cacheDeletePattern('platform:stats');
-  } else {
-    // Conflict occurred - fetch existing row
-    const existing = await pool.query(
-      'SELECT * FROM bets WHERE tx_hash = $1',
-      [tx_hash],
-    );
-    bet = existing.rows[0];
+
+  try {
+    // ── Layer 2: PostgreSQL row-level lock ─────────────────────────────────
+    // SELECT … FOR UPDATE ensures that within the DB transaction each bet
+    // reads and writes the market row atomically, preventing two concurrent
+    // DB transactions from both reading the same stale pool totals.
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // Lock the market row for the duration of this transaction so no other
+      // concurrent transaction can read or write stale pool state.
+      const marketLockResult = await client.query(
+        'SELECT market_id FROM markets WHERE market_id = $1 FOR UPDATE',
+        [market_id],
+      );
+      if (marketLockResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        throw AppError.notFound(`Market not found: ${market_id}`);
+      }
+
+      const result = await client.query(
+        `INSERT INTO bets (market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (tx_hash) DO NOTHING
+         RETURNING *`,
+        [market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence],
+      );
+
+      if (result.rows.length > 0) {
+        bet = result.rows[0];
+        // Invalidate cache only on new insert
+        await cacheDeletePattern(`market:${market_id}*`);
+        await cacheDeletePattern('platform:stats');
+      } else {
+        // Conflict occurred - fetch existing row
+        const existing = await client.query(
+          'SELECT * FROM bets WHERE tx_hash = $1',
+          [tx_hash],
+        );
+        bet = existing.rows[0];
+      }
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  } finally {
+    // Always release the Redis lock — even on error — so the next request
+    // can acquire it immediately rather than waiting for TTL expiry.
+    await lock.release();
   }
 
   return {
@@ -87,7 +155,7 @@ export async function recordBet(
 
 /**
  * Fetches paginated bets for a Stellar address.
- * 
+ *
  * Steps:
  *   1. Validate Stellar address format
  *   2. JOIN with markets table to include market info
@@ -99,47 +167,117 @@ export async function fetchBetsByAddress(
   bettor_address: string,
   page: number = 1,
   limit: number = 50,
+  cursor: string | null = null,
+  legacyOffset?: number,
 ): Promise<FetchBetsResult> {
   // Validate Stellar address format
   if (!/^G[A-Z2-7]{55}$/.test(bettor_address)) {
     throw AppError.badRequest('Invalid Stellar address format');
   }
 
-  const offset = (page - 1) * limit;
+  if (!Number.isInteger(page) || page < 1) {
+    throw AppError.badRequest('page must be an integer >= 1');
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw AppError.badRequest('limit must be an integer between 1 and 100');
+  }
 
-  // Get total count
-  const countResult = await pool.query(
-    'SELECT COUNT(*) as total FROM bets WHERE bettor_address = $1',
-    [bettor_address],
-  );
-  const total = Number(countResult.rows[0]?.total ?? 0);
+  const cursorMode = cursor !== null;
+  let rows: QueryResultRow[];
+  if (cursorMode) {
+    let cursorPosition: { placedAt: string; id: number } | null = null;
+    if (cursor) {
+      try {
+        const decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+        if (
+          typeof decoded.placedAt !== 'string' ||
+          !Number.isInteger(decoded.id) ||
+          decoded.id < 1 ||
+          Number.isNaN(Date.parse(decoded.placedAt))
+        ) throw new Error('Invalid cursor payload');
+        cursorPosition = decoded;
+      } catch {
+        throw AppError.badRequest('cursor is invalid');
+      }
+    }
 
-  // Get paginated bets with market info
-  const result = await pool.query(
-    `SELECT 
-       b.id, b.market_id, b.bettor_address, b.side, b.amount, b.amount_xlm,
-       b.placed_at, b.claimed, b.claimed_at, b.payout, b.tx_hash, b.ledger_sequence,
-       m.fighter_a, m.fighter_b, m.status
-     FROM bets b
-     JOIN markets m ON b.market_id = m.market_id
-     WHERE b.bettor_address = $1
-     ORDER BY b.placed_at DESC
-     LIMIT $2 OFFSET $3`,
-    [bettor_address, limit, offset],
-  );
+    const result = cursorPosition
+      ? await pool.query(
+          `SELECT
+             b.id, b.market_id, b.bettor_address, b.side, b.amount, b.amount_xlm,
+             b.odds_snapshot, b.placed_at, b.claimed, b.claimed_at, b.payout, b.tx_hash, b.ledger_sequence,
+             m.fighter_a, m.fighter_b, m.status
+           FROM bets b
+           JOIN markets m ON b.market_id = m.market_id
+           WHERE b.bettor_address = $1 AND (b.placed_at, b.id) < ($2::timestamptz, $3::integer)
+           ORDER BY b.placed_at DESC, b.id DESC
+           LIMIT $4`,
+          [bettor_address, cursorPosition.placedAt, cursorPosition.id, limit + 1],
+        )
+      : await pool.query(
+          `SELECT
+             b.id, b.market_id, b.bettor_address, b.side, b.amount, b.amount_xlm,
+             b.odds_snapshot, b.placed_at, b.claimed, b.claimed_at, b.payout, b.tx_hash, b.ledger_sequence,
+             m.fighter_a, m.fighter_b, m.status
+           FROM bets b
+           JOIN markets m ON b.market_id = m.market_id
+           WHERE b.bettor_address = $1
+           ORDER BY b.placed_at DESC, b.id DESC
+           LIMIT $2`,
+          [bettor_address, limit + 1],
+        );
+    rows = result.rows;
+  } else {
+    if (!Number.isInteger(page) || page < 1) {
+      throw AppError.badRequest('page must be an integer >= 1');
+    }
+    if (legacyOffset !== undefined && (!Number.isInteger(legacyOffset) || legacyOffset < 0)) {
+      throw AppError.badRequest('offset must be a non-negative integer');
+    }
+    const offset = legacyOffset ?? (page - 1) * limit;
+    const [countResult, result] = await Promise.all([
+      pool.query('SELECT COUNT(*) as total FROM bets WHERE bettor_address = $1', [bettor_address]),
+      pool.query(
+        `SELECT
+           b.id, b.market_id, b.bettor_address, b.side, b.amount, b.amount_xlm,
+           b.odds_snapshot, b.placed_at, b.claimed, b.claimed_at, b.payout, b.tx_hash, b.ledger_sequence,
+           m.fighter_a, m.fighter_b, m.status
+         FROM bets b
+         JOIN markets m ON b.market_id = m.market_id
+         WHERE b.bettor_address = $1
+         ORDER BY b.placed_at DESC, b.id DESC
+         LIMIT $2 OFFSET $3`,
+        [bettor_address, limit + 1, offset],
+      ),
+    ]);
+    rows = result.rows;
+    const total = Number(countResult.rows[0]?.total ?? 0);
+    const hasMore = rows.length > limit;
+    const bets = rows.slice(0, limit).map((row) => ({
+      ...row,
+      placed_at: new Date(row.placed_at),
+      claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
+    } as BetWithMarket));
+    return { bets, total, nextCursor: hasMore ? encodeBetCursor(bets[bets.length - 1]) : null };
+  }
 
-  const bets = result.rows.map((row) => ({
+  const hasMore = rows.length > limit;
+  const bets = rows.slice(0, limit).map((row) => ({
     ...row,
     placed_at: new Date(row.placed_at),
     claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
   } as BetWithMarket));
 
-  return { bets, total };
+  return { bets, nextCursor: hasMore ? encodeBetCursor(bets[bets.length - 1]) : null };
+}
+
+function encodeBetCursor(bet: BetWithMarket): string {
+  return Buffer.from(JSON.stringify({ placedAt: bet.placed_at.toISOString(), id: bet.id })).toString('base64url');
 }
 
 /**
  * Calculates the projected payout for a specific bettor on a specific market.
- * 
+ *
  * Steps:
  *   1. Fetch bettor's BetPosition and market's pool sizes from DB
  *   2. Formula: (amount / winning_pool) * (total_pool - fee)

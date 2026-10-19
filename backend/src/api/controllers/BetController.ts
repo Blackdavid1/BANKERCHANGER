@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — Bet Controller
+// BANKERCHANGER — Bet Controller
 // Claim endpoints for winning bettors.
 // ============================================================
 
@@ -82,6 +82,9 @@ export async function getBettorStats(
     const stats = await MarketService.getBettorStats(bettor_address);
     res.status(200).json(stats);
   } catch (err) {
+    if (err instanceof AppError && err.statusCode === 400) {
+      return next(err);
+    }
     next(err);
   }
 }
@@ -90,6 +93,7 @@ export async function getBettorStats(
  * GET /api/bets/:bettor_address
  *
  * Returns paginated bets placed by a given Stellar address.
+ * Validates the Stellar address format and returns 400 Bad Request if invalid.
  */
 export async function getBetsByAddress(
   req: Request,
@@ -98,29 +102,52 @@ export async function getBetsByAddress(
 ): Promise<void> {
   try {
     const { bettor_address } = req.params;
-    let page = parseInt(req.query.page as string, 10) || 1;
-    let limit = parseInt(req.query.limit as string, 10) || 50;
+    const legacyPage = req.query.page !== undefined;
+    const legacyOffset = req.query.offset !== undefined ? parseInt(req.query.offset as string, 10) : undefined;
+    const page = legacyPage ? parseInt(req.query.page as string, 10) : 1;
+    const limit = req.query.limit !== undefined ? parseInt(req.query.limit as string, 10) : 50;
+    const cursor = req.query.cursor as string | undefined;
+    const cursorMode = cursor !== undefined || (!legacyPage && legacyOffset === undefined);
 
-    if (!StrKey.isValidEd25519PublicKey(bettor_address)) {
+    // Validate Stellar address format early and return 400 (not 500) for invalid addresses
+    try {
+      if (!StrKey.isValidEd25519PublicKey(bettor_address)) {
+        throw AppError.badRequest(
+          'Invalid Stellar address format',
+          ERROR_CODES.INVALID_REQUEST
+        );
+      }
+    } catch (validationErr) {
+      // If validation error is already an AppError, rethrow it
+      if (validationErr instanceof AppError) {
+        throw validationErr;
+      }
+      // Otherwise wrap any validation exception as a 400 Bad Request
       throw AppError.badRequest(
         'Invalid Stellar address format',
         ERROR_CODES.INVALID_REQUEST
       );
     }
 
-    // Validate pagination params
-    if (page < 1) page = 1;
-    if (limit < 1) limit = 50;
-    if (limit > 200) limit = 200;
-
-    const result = await BetService.fetchBetsByAddress(bettor_address, page, limit);
-    res.status(200).json({
-      bets: result.bets,
-      total: result.total,
+    const result = await BetService.fetchBetsByAddress(
+      bettor_address,
       page,
       limit,
-    });
+      cursorMode ? cursor ?? '' : null,
+      legacyOffset,
+    );
+    if (cursorMode) {
+      res.status(200).json({ bets: result.bets, nextCursor: result.nextCursor, limit });
+      return;
+    }
+
+    res.setHeader('Deprecation', 'true');
+    res.setHeader('Sunset', 'Fri, 02 Apr 2027 00:00:00 GMT');
+    res.status(200).json({ bets: result.bets, total: result.total, limit, nextCursor: result.nextCursor });
   } catch (err) {
+    if (err instanceof AppError && err.statusCode === 400) {
+      return next(err);
+    }
     next(err);
   }
 }

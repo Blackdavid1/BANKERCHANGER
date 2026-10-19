@@ -1,30 +1,87 @@
 //! ============================================================
-//! BOXMEOUT — Shared Types
+//! BANKERCHANGER — Shared Types
 //! All contracts import from this crate.
 //! Contributors: DO NOT add logic here — types and structs only.
 //! ============================================================
 
 use soroban_sdk::{contracttype, Address, BytesN, String};
 
+// ─── Valid Market Categories (Weight Classes) ─────────────────────────────────
+//
+// These are the only values accepted by `create_market` for `fight.weight_class`.
+// Any other value will cause the call to return `ContractError::InvalidCategory`.
+//
+// Off-chain tools (indexer, frontend) rely on this fixed set to display
+// category filters correctly. Storing an arbitrary string in contract storage
+// would cause data inconsistency and break off-chain assumptions.
+
+pub const CATEGORY_HEAVYWEIGHT: &str        = "Heavyweight";
+pub const CATEGORY_CRUISERWEIGHT: &str      = "Cruiserweight";
+pub const CATEGORY_LIGHT_HEAVYWEIGHT: &str  = "Light Heavyweight";
+pub const CATEGORY_SUPER_MIDDLEWEIGHT: &str = "Super Middleweight";
+pub const CATEGORY_MIDDLEWEIGHT: &str       = "Middleweight";
+pub const CATEGORY_SUPER_WELTERWEIGHT: &str = "Super Welterweight";
+pub const CATEGORY_WELTERWEIGHT: &str       = "Welterweight";
+pub const CATEGORY_SUPER_LIGHTWEIGHT: &str  = "Super Lightweight";
+pub const CATEGORY_LIGHTWEIGHT: &str        = "Lightweight";
+pub const CATEGORY_SUPER_FEATHERWEIGHT: &str = "Super Featherweight";
+pub const CATEGORY_FEATHERWEIGHT: &str      = "Featherweight";
+pub const CATEGORY_SUPER_BANTAMWEIGHT: &str = "Super Bantamweight";
+pub const CATEGORY_BANTAMWEIGHT: &str       = "Bantamweight";
+pub const CATEGORY_SUPER_FLYWEIGHT: &str    = "Super Flyweight";
+pub const CATEGORY_FLYWEIGHT: &str          = "Flyweight";
+pub const CATEGORY_LIGHT_FLYWEIGHT: &str    = "Light Flyweight";
+pub const CATEGORY_MINIMUMWEIGHT: &str      = "Minimumweight";
+
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum MarketStatus {
-    Open,       // Bets are being accepted
-    Locked,     // Fight has started; bets are closed
-    Resolved,   // Winner declared; claims are open
-    Cancelled,  // Fight cancelled; full refunds available
-    Disputed,   // Outcome under admin review; claims frozen
+    Open,              // Bets are being accepted
+    Locked,            // Fight has started; bets are closed
+    ResolutionPending, // Oracle consensus reached; cooldown window active
+    Resolved,          // Winner declared; claims are open (cooldown elapsed)
+    Cancelled,         // Fight cancelled; full refunds available
+    Disputed,          // Outcome under admin review; claims frozen
+    Paused,            // Market paused by admin
+}
+
+/// Market tier classification for the AMM & Odds Calculation Pipeline.
+///
+/// Each tier defines different liquidity pool requirements and slippage
+/// tolerance thresholds suited to the expected bet volume and market depth.
+///
+/// | Tier | Min Liquidity (XLM) | Max Slippage (bps) | Description           |
+/// |------|---------------------|--------------------|-----------------------|
+/// | 8    | 80 XLM              | 3 000 bps (30 %)   | Entry-level market    |
+/// | 10   | 100 XLM             | 2 500 bps (25 %)   | Standard market       |
+/// | 12   | 120 XLM             | 2 000 bps (20 %)   | Established market    |
+/// | 14   | 140 XLM             | 1 500 bps (15 %)   | High-volume market    |
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum MarketTier {
+    /// Tier 8 — entry-level markets with 80 XLM minimum liquidity.
+    /// Max slippage: 3 000 bps (30 %). Suitable for debut fighters.
+    Tier8,
+    /// Tier 10 — standard markets with 100 XLM minimum liquidity.
+    /// Max slippage: 2 500 bps (25 %). Suitable for regional title fights.
+    Tier10,
+    /// Tier 12 — established markets with 120 XLM minimum liquidity.
+    /// Max slippage: 2 000 bps (20 %). Suitable for major title fights.
+    Tier12,
+    /// Tier 14 — high-volume markets with 140 XLM minimum liquidity.
+    /// Max slippage: 1 500 bps (15 %). Suitable for world championship bouts.
+    Tier14,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
-    FighterA,   // First boxer wins
-    FighterB,   // Second boxer wins
-    Draw,       // Match ends in a draw
-    NoContest,  // Fight invalidated (DQ, early stop, etc.)
+    FighterA,  // First boxer wins
+    FighterB,  // Second boxer wins
+    Draw,      // Match ends in a draw
+    NoContest, // Fight invalidated (DQ, early stop, etc.)
 }
 
 #[contracttype]
@@ -71,6 +128,9 @@ pub struct FightDetails {
 pub struct MarketConfig {
     /// Minimum bet in stroops (1 XLM = 10_000_000 stroops)
     pub min_bet_amount: i128,
+    /// Maximum share of the total market pool per bettor, in basis points
+    /// (2_000 = 20%; valid range: 1..=10_000).
+    pub max_bet_share_bps: u32,
     /// Maximum single bet in stroops
     pub max_bet: i128,
     /// Platform fee in basis points (200 = 2%)
@@ -79,6 +139,15 @@ pub struct MarketConfig {
     pub lock_before_secs: u64,
     /// Seconds after scheduled_at within which oracle must resolve
     pub resolution_window: u64,
+    /// Market tier — determines pool depth requirements and slippage tolerance.
+    /// e.g. 18 = Tier 18 (mid-range), 20 = Tier 20 (high-stakes).
+    /// Tier 0 means untiered / default.
+    pub tier: u32,
+    /// Number of ledgers to wait after oracle consensus before resolution is
+    /// finalised. During this window an admin can raise a dispute.
+    /// At ~5 s per ledger, 720 ledgers ≈ 1 hour.
+    /// Set to 0 to disable the cooldown (immediate resolution).
+    pub dispute_cooldown_ledgers: u32,
 }
 
 /// Configuration passed to MarketFactory on initialization.
@@ -125,6 +194,23 @@ pub struct BetRecord {
     pub claimed: bool,
 }
 
+/// Outcome probabilities captured in basis points when a bet is placed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OddsSnapshot {
+    pub odds_a: u32,
+    pub odds_b: u32,
+    pub odds_draw: u32,
+}
+
+/// BetPlaced event payload including the odds offered before the stake is added.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BetPlacedPayload {
+    pub bet: BetRecord,
+    pub odds_at_bet_time: OddsSnapshot,
+}
+
 /// Optional outcome — used in MarketState to avoid Option<EnumType> which
 /// is not supported by #[contracttype] in soroban-sdk 20.x.
 #[contracttype]
@@ -140,6 +226,15 @@ pub enum OptionalOutcome {
 pub enum OptionalOracleRole {
     None,
     Some(OracleRole),
+}
+
+/// Optional market tier — same workaround as OptionalOutcome.
+/// Present on markets that have been assigned a tier classification.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OptionalMarketTier {
+    None,
+    Some(MarketTier),
 }
 
 /// Full runtime state of a market — stored inside the Market contract.
@@ -164,6 +259,9 @@ pub struct MarketState {
     pub resolved_at: u64,
     /// None until resolved
     pub oracle_used: OptionalOracleRole,
+    /// AMM tier classification — determines liquidity requirements and slippage tolerance.
+    /// Set at initialization; None for markets created before the tier system was introduced.
+    pub tier: OptionalMarketTier,
 }
 
 /// Signed result report submitted by an oracle.
@@ -197,7 +295,7 @@ pub struct UserPosition {
 
 /// Receipt returned to the bettor after a successful claim.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ClaimReceipt {
     pub bettor: Address,
     pub market_id: u64,
@@ -207,3 +305,81 @@ pub struct ClaimReceipt {
     pub fee_deducted: i128,
     pub claimed_at: u64,
 }
+
+// ─── Treasury Audit Trail ─────────────────────────────────────────────────────
+
+/// The type of fund-moving operation recorded in the treasury audit ledger.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuditAction {
+    /// A market deposited fees into the treasury.
+    FeeDeposited,
+    /// Fees were received from a registered market.
+    FeeReceived,
+    /// The admin withdrew accumulated fees.
+    FeeWithdrawn,
+    /// The admin emergency-drained all fees for a token.
+    FeeDrained,
+    /// Admin withdrew accumulated fees to a destination address.
+    FeeWithdrawal,
+    /// Admin performed an emergency drain of all fees for a token.
+    EmergencyDrain,
+    /// A market deposited fees into the treasury.
+    FeeDeposit,
+    /// Daily withdrawal cap was reached for the current day bucket.
+    DailyCapReached,
+}
+
+/// An immutable, append-only entry in the treasury audit ledger.
+///
+/// Entries are keyed by a monotonically increasing `id` and are never mutated
+/// or removed — they form a tamper-evident history of every fund movement.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuditEntry {
+    /// Monotonically increasing entry id (1-based) or sequence number.
+    pub id: u64,
+    /// The action that produced this entry.
+    pub action: AuditAction,
+    /// The token involved in the operation.
+    pub token: Address,
+    /// The signed amount moved (positive for in, negative for out).
+    pub amount: i128,
+    /// The acting address (market or admin).
+    pub actor: Address,
+    /// Ledger timestamp when the entry was recorded.
+    pub timestamp: u64,
+    /// Day bucket (timestamp / 86400) for daily-limit queries.
+    pub day_bucket: u64,
+    /// Destination address that received the tokens.
+    pub destination: Address,
+}
+
+/// A volume tier boundary and basis point rate for dynamic fee calculation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeeTier {
+    /// Volume threshold upper boundary in stroops (1 XLM = 10_000_000 stroops).
+    /// If market total volume <= volume_threshold, this tier's fee_bps applies.
+    pub volume_threshold: u64,
+    /// Platform fee in basis points (e.g. 200 = 2.00%, 150 = 1.50%, 100 = 1.00%).
+    pub fee_bps: u32,
+}
+
+/// LP position held by a liquidity provider in a market pool.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiquidityPosition {
+    /// Provider's Stellar address
+    pub provider: Address,
+    /// Market ID this position is for
+    pub market_id: u64,
+    /// Number of LP shares held
+    pub lp_shares: i128,
+    /// Fee-per-share accumulator snapshot at entry (for fee calculation)
+    pub fee_debt: i128,
+    /// Timestamp when the position was opened
+    pub entered_at: u64,
+}
+
+

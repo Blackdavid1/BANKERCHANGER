@@ -6,7 +6,7 @@ import { getConnectedAddress, createProposal } from '@/services/wallet';
 import { TxStatusToast } from '@/components/ui/TxStatusToast';
 import type { TxStatus, ProposalType } from '@/types';
 
-// Mock data to satisfy "ILN contract" requirements within BOXMEOUT codebase
+// Mock data to satisfy "ILN contract" requirements within BANKERCHANGER codebase
 const MIN_ILN_REQUIRED = 10000;
 const MOCK_APPROVED_TOKENS = [
   { address: 'CBZ...X1', name: 'USDC' },

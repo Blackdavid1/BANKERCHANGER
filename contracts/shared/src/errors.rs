@@ -1,5 +1,5 @@
 //! ============================================================
-//! BOXMEOUT — Contract Error Types
+//! BANKERCHANGER — Contract Error Types
 //! Every contract function returns Result<T, ContractError>.
 //! No unwrap() allowed in contract code.
 //! ============================================================
@@ -20,6 +20,10 @@ pub enum ContractError {
     NotFactory = 3,
     /// Market contract is not registered or approved
     UnregisteredMarket = 6,
+    /// Pending admin transfer proposal has expired
+    PendingAdminExpired = 7,
+    /// Admin timelock is active; proposal cannot be accepted yet
+    AdminTimelockActive = 8,
 
     // ── Market State ───────────────────────────────────────
     /// Requested market ID does not exist
@@ -42,13 +46,15 @@ pub enum ContractError {
     BettingClosed = 18,
     /// Bet amount exceeds maximum allowed
     BetTooLarge = 19,
+    /// Market is paused
+    MarketPaused = 48,
 
     // ── Bet Validation ─────────────────────────────────────
     /// Bet amount is below minimum allowed
     BetTooLow = 20,
     /// Transfer amount is insufficient for the requested operation
     InsufficientAmount = 21,
-    /// Bettor has already placed a bet in this market
+    /// Legacy error code retained for compatibility; multiple bets are now allowed
     AlreadyBet = 22,
     /// Bettor has already claimed winnings or refund
     AlreadyClaimed = 23,
@@ -60,6 +66,8 @@ pub enum ContractError {
     BelowMinimum = 26,
     /// Amount must be positive and non-zero
     InvalidAmount = 27,
+    /// Bet would exceed the bettor's configured share of the market pool
+    BetLimitExceeded = 28,
 
     // ── Oracle / Resolution ────────────────────────────────
     /// Oracle signature verification failed
@@ -68,6 +76,14 @@ pub enum ContractError {
     ResolutionWindowExpired = 31,
     /// Two or more conflicting oracle reports were submitted
     ConflictingOracleReport = 32,
+    /// Resolution was attempted before the scheduled fight start
+    MarketNotStarted = 33,
+    /// finalize_resolution called before the dispute cooldown window has elapsed
+    DisputeCooldownActive = 34,
+    /// finalize_resolution called on a market not in ResolutionPending state
+    ResolutionNotPending = 35,
+    /// Market was not configured to allow Draw outcome
+    DrawNotAllowed = 36,
 
     // ── Treasury ───────────────────────────────────────────
     /// Fee withdrawals are temporarily paused
@@ -78,6 +94,10 @@ pub enum ContractError {
     InsufficientBalance = 42,
     /// Market is not approved to deposit or receive fees
     MarketNotApproved = 43,
+    /// A fee extraction is already in progress; concurrent call rejected
+    FeeExtractionInProgress = 44,
+    /// The daily withdrawal cap has been reached for today's bucket
+    DailyCapReached = 45,
 
     // ── Factory ────────────────────────────────────────────
     /// Factory is paused; new market creation is disabled
@@ -94,4 +114,16 @@ pub enum ContractError {
     // ── Reentrancy ─────────────────────────────────────────
     /// A claim or refund transfer is already in progress
     ReentrancyGuard = 60,
+
+    // ── Slippage ────────────────────────────────────────────
+    /// Computed shares out are below the caller's min_shares_out tolerance
+    SlippageExceeded = 61,
+
+    // ── Reserve ────────────────────────────────────────────
+    /// Withdrawal would bring the treasury balance below the configured minimum reserve
+    InsufficientReserve = 62,
+
+    // ── Arithmetic ─────────────────────────────────────────
+    /// Arithmetic operation resulted in overflow
+    ArithmeticOverflow = 70,
 }

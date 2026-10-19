@@ -2,7 +2,7 @@
 
 ## Overview
 
-This directory contains comprehensive unit tests for the React hooks used in the BOXMEOUT frontend application. Tests are written using `@testing-library/react` and `msw` (Mock Service Worker) to ensure all API interactions are mocked without requiring a real backend.
+This directory contains comprehensive unit tests for the React hooks used in the BANKERCHANGER frontend application. Tests are written using `@testing-library/react` and `msw` (Mock Service Worker) to ensure all API interactions are mocked without requiring a real backend.
 
 ## Setup and Usage
 

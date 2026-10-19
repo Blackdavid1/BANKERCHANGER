@@ -39,11 +39,11 @@ export const emailSchema = z
 
 export const passwordSchema = z
   .string()
-  .min(8)
+  .min(12, 'Password must be at least 12 characters')
   .max(128)
   .regex(/[A-Z]/, 'Password must contain at least one uppercase letter')
   .regex(/[a-z]/, 'Password must contain at least one lowercase letter')
-  .regex(/[0-9]/, 'Password must contain at least one number')
+  .regex(/[0-9]/, 'Password must contain at least one digit')
   .regex(/[^A-Za-z0-9]/, 'Password must contain at least one special character');
 
 export const registerBody = z.object({
@@ -223,7 +223,8 @@ export const updateProfileBody = z
       )
       .optional(),
     avatarUrl: z.string().url('avatarUrl must be a valid URL').optional(),
+    walletAddress: z.string().refine((val) => StrKey.isValidEd25519PublicKey(val), { message: 'Invalid Stellar address format' }).optional(),
   })
-  .refine((data) => data.username !== undefined || data.avatarUrl !== undefined, {
-    message: 'At least one field (username or avatarUrl) must be provided',
+  .refine((data) => data.username !== undefined || data.avatarUrl !== undefined || data.walletAddress !== undefined, {
+    message: 'At least one field (username, avatarUrl, or walletAddress) must be provided',
   });

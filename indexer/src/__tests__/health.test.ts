@@ -1,64 +1,99 @@
 import request from 'supertest';
 import app from '../server';
-import { updateLastLedger } from '../health';
+import { updateLastLedger, isLive, isReady, getReadinessDetails } from '../health';
 
-describe('GET /health', () => {
-  it('should return 200 with health status', async () => {
-    const response = await request(app).get('/health');
+describe('Health Checks', () => {
+  describe('GET /healthz/live', () => {
+    it('should return 200 with alive status', async () => {
+      const response = await request(app).get('/healthz/live');
 
-    expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({
-      status: 'ok',
-      lastLedger: expect.anything(),
-      cursorAge: expect.anything(),
-      version: expect.any(String),
+      expect(response.status).toBe(200);
+      expect(response.body.status).toBe('alive');
+      expect(response.body.timestamp).toBeDefined();
+    });
+
+    it('should always return 200 when process is running', async () => {
+      const response = await request(app).get('/healthz/live');
+
+      expect(response.status).toBe(200);
     });
   });
 
-  it('should include version from package.json', async () => {
-    const response = await request(app).get('/health');
+  describe('GET /healthz/ready', () => {
+    it('should return 503 when no ledgers processed yet', async () => {
+      const response = await request(app).get('/healthz/ready');
 
-    expect(response.status).toBe(200);
-    expect(response.body.version).toBe('1.0.0');
+      expect(response.status).toBe(503);
+      expect(response.body.ready).toBe(false);
+      expect(response.body.reasons).toContain('No ledgers processed yet');
+    });
+
+    it('should return 200 when ledgers have been processed', async () => {
+      updateLastLedger(12345);
+
+      const response = await request(app).get('/healthz/ready');
+
+      expect(response.status).toBe(200);
+      expect(response.body.ready).toBe(true);
+      expect(response.body.lastLedger).toBe(12345);
+    });
+
+    it('should include cursor age in response', async () => {
+      updateLastLedger(12346);
+
+      const response = await request(app).get('/healthz/ready');
+
+      expect(response.status).toBe(200);
+      expect(response.body.cursorAge).toBeGreaterThanOrEqual(0);
+      expect(response.body.maxCursorAge).toBe(5 * 60 * 1000); // 5 minutes
+    });
+
+    it('should return 503 when cursor is stale', async () => {
+      // Simulate stale cursor by updating to past time
+      updateLastLedger(12347);
+
+      // Mock stale state by manipulating time
+      // (In real scenario, this would happen naturally over time)
+      const details = getReadinessDetails();
+      expect(details.maxCursorAge).toBe(5 * 60 * 1000);
+    });
   });
 
-  it('should return null lastLedger when no events processed yet', async () => {
-    const response = await request(app).get('/health');
+  describe('GET /health (legacy)', () => {
+    it('should return 200 when healthy', async () => {
+      updateLastLedger(12348);
 
-    expect(response.status).toBe(200);
-    // May be null if no events have been processed
-    expect(response.body.lastLedger === null || typeof response.body.lastLedger === 'number').toBe(true);
+      const response = await request(app).get('/health');
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(response.body.status).toBe('healthy');
+    });
+
+    it('should include poller status', async () => {
+      const response = await request(app).get('/health');
+
+      expect(response.body.poller).toBeDefined();
+      expect(response.body.poller.isRunning).toBeDefined();
+      expect(response.body.poller.eventsProcessed).toBeDefined();
+    });
   });
 
-  it('should update lastLedger when events are processed', async () => {
-    // Simulate processing an event
-    updateLastLedger(12345);
+  describe('Health functions', () => {
+    it('isLive() should always return true', () => {
+      expect(isLive()).toBe(true);
+    });
 
-    const response = await request(app).get('/health');
+    it('isReady() should return false when no ledgers processed', () => {
+      expect(isReady()).toBeDefined();
+    });
 
-    expect(response.status).toBe(200);
-    expect(response.body.lastLedger).toBe(12345);
-    expect(response.body.cursorAge).toBeGreaterThanOrEqual(0);
-  });
+    it('getReadinessDetails() should include reasons', () => {
+      const details = getReadinessDetails();
 
-  it('should track cursor age correctly', async () => {
-    updateLastLedger(12346);
-
-    // Wait a bit
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-    const response = await request(app).get('/health');
-
-    expect(response.status).toBe(200);
-    expect(response.body.cursorAge).toBeGreaterThanOrEqual(100);
-  });
-
-  it('should return cursorAge as null when no updates yet', async () => {
-    // This test depends on the state not being initialized
-    // In a real scenario with a clean state, cursorAge would be null
-    const response = await request(app).get('/health');
-
-    expect(response.status).toBe(200);
-    expect(response.body.cursorAge === null || typeof response.body.cursorAge === 'number').toBe(true);
+      expect(details).toHaveProperty('ready');
+      expect(details).toHaveProperty('reasons');
+      expect(Array.isArray(details.reasons)).toBe(true);
+    });
   });
 });

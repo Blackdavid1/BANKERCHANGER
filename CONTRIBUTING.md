@@ -41,6 +41,29 @@ gh api repos/doradenise-jpg/BANKERCHANGER/branches/main/protection \
   --field restrictions=null
 ```
 
+## Naming Conventions
+
+This project was originally prototyped under the name **boxmeout**. The canonical name is now **BANKERCHANGER**. Use the table below whenever adding new code, comments, configuration, or documentation.
+
+| Context | Accepted name | Never use |
+|---------|--------------|-----------|
+| Repository name, PR titles, docs headings | `BANKERCHANGER` | `BoxMeOut`, `boxmeout`, `BOXMEOUT` |
+| App name in UI / metadata | `BANKERCHANGER` | `BoxMeOut` |
+| npm package names | `bankerchanger-backend`, `bankerchanger-frontend` | `boxmeout-backend`, `boxmeout-frontend` |
+| Database name / user / password (local dev) | `bankerchanger` | `boxmeout` |
+| `DATABASE_URL` default | `postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger` | any `boxmeout` URL |
+| Email sender address | `no-reply@bankerchanger.app` | `no-reply@boxmeout.app` |
+| `APP_NAME` env var | `BANKERCHANGER` | `BoxMeOut` |
+| localStorage / sessionStorage keys | `bankerchanger_*` | `boxmeout_*` |
+| Custom DOM events | `bankerchanger:*` | `boxmeout:*` |
+| Prometheus job label | `bankerchanger` | `boxmeout` |
+| Source-file comment headers | `// BANKERCHANGER — …` | `// BOXMEOUT — …` |
+| Soroban contract package names in `Cargo.toml` | **unchanged** — `boxmeout-market`, `boxmeout-market-factory`, `boxmeout-treasury`, `boxmeout-shared` | do **not** rename these |
+| Rust `use` / function-call paths in contracts | **unchanged** — `boxmeout_shared::…` | do **not** rename these |
+| Compiled WASM filenames | **unchanged** — `boxmeout_treasury.wasm`, `boxmeout_market_factory.wasm`, `boxmeout_market.wasm` | do **not** rename these |
+
+> **Why keep the contract names?** The Soroban smart contracts are deployed on-chain under those identifiers. Renaming the Rust crate names would require redeploying all contracts and migrating all existing on-chain state — a breaking change outside the scope of this rebranding.
+
 ## Development Workflow
 
 1. Fork the repository and create a feature branch from `main`:

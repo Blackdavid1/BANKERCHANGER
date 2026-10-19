@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — Market Service
+// BANKERCHANGER — Market Service
 // Business logic layer between controllers and the DB/chain.
 // Contributors: implement every function marked TODO.
 // ============================================================
@@ -10,10 +10,39 @@ import { pool } from '../config/db';
 import * as cache from './cache.service';
 import * as StellarService from './StellarService';
 import { AppError } from '../utils/AppError';
+import { ERROR_CODES } from '../constants/errorCodes';
+import { logger } from '../utils/logger';
 
 // ---------------------------------------------------------------------------
 // DB adapter — thin abstraction so tests can inject a mock
 // ---------------------------------------------------------------------------
+// Valid state transitions for market status.
+// Enforced in updateMarketStatus to prevent invalid transitions.
+const VALID_TRANSITIONS: Record<string, string[]> = {
+  open:      ['locked', 'cancelled', 'disputed'],
+  locked:    ['resolved', 'cancelled', 'disputed'],
+  resolved:  ['disputed'],
+  disputed:  ['resolved'],
+  cancelled: [],
+};
+
+/**
+ * Validates a market status transition against the state machine.
+ * Throws AppError if the transition is not allowed.
+ */
+export function validateStatusTransition(currentStatus: string, newStatus: string): void {
+  const allowed = VALID_TRANSITIONS[currentStatus];
+  if (!allowed) {
+    throw new AppError(400, `Unknown market status: ${currentStatus}`);
+  }
+  if (!allowed.includes(newStatus)) {
+    throw new AppError(
+      400,
+      `Invalid status transition: ${currentStatus} → ${newStatus}. Allowed: ${allowed.join(', ') || 'none'}`,
+    );
+  }
+}
+
 export interface DbAdapter {
   findMarkets(filters?: MarketFilters): Promise<Market[]>;
   findMarketById(market_id: string): Promise<Market | null>;
@@ -21,6 +50,123 @@ export interface DbAdapter {
   findBetsByMarket(market_id: string, bettor_address?: string): Promise<Bet[]>;
   updateMarketStatus(market_id: string, status: string): Promise<void>;
 }
+
+export const defaultDbAdapter: DbAdapter = {
+  async findMarkets(filters?: MarketFilters): Promise<Market[]> {
+    const whereClauses: string[] = [];
+    const values: unknown[] = [];
+
+    if (filters?.status) {
+      values.push(filters.status);
+      whereClauses.push(`status = $${values.length}`);
+    }
+    if (filters?.weight_class) {
+      values.push(filters.weight_class);
+      whereClauses.push(`weight_class = $${values.length}`);
+    }
+    if (filters?.fighter) {
+      values.push(`%${filters.fighter}%`);
+      whereClauses.push(`(fighter_a ILIKE $${values.length} OR fighter_b ILIKE $${values.length})`);
+    }
+    if (filters?.dateFrom) {
+      values.push(filters.dateFrom);
+      whereClauses.push(`scheduled_at >= $${values.length}`);
+    }
+    if (filters?.dateTo) {
+      values.push(filters.dateTo);
+      whereClauses.push(`scheduled_at <= $${values.length}`);
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+    const orderBySql =
+      filters?.sort === 'date_asc' ? 'ORDER BY scheduled_at ASC' :
+      filters?.sort === 'pool_desc' ? 'ORDER BY total_pool DESC' :
+      'ORDER BY scheduled_at DESC';
+
+    const { rows } = await pool.query(
+      `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
+       FROM markets m
+       LEFT JOIN (
+         SELECT market_id, COUNT(*) AS bet_count
+         FROM bets
+         GROUP BY market_id
+       ) b ON m.market_id = b.market_id
+       ${whereSql} ${orderBySql}`,
+      values,
+    );
+
+    return rows.map((row) => ({
+      ...row,
+      bet_count: Number(row.bet_count ?? 0),
+      scheduled_at: new Date(row.scheduled_at),
+      created_at: new Date(row.created_at),
+      updated_at: new Date(row.updated_at),
+      resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
+    } as Market & { bet_count: number }));
+  },
+
+  async findMarketById(market_id: string): Promise<Market | null> {
+    const { rows } = await pool.query(
+      `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
+       FROM markets m
+       LEFT JOIN (
+         SELECT market_id, COUNT(*) AS bet_count
+         FROM bets
+         GROUP BY market_id
+       ) b ON m.market_id = b.market_id
+       WHERE m.market_id = $1`,
+      [market_id],
+    );
+    if (rows.length === 0) return null;
+    const row = rows[0];
+    return {
+      ...row,
+      bet_count: Number(row.bet_count ?? 0),
+      scheduled_at: new Date(row.scheduled_at),
+      created_at: new Date(row.created_at),
+      updated_at: new Date(row.updated_at),
+      resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
+    } as Market & { bet_count: number };
+  },
+
+  async findBetsByAddress(bettor_address: string): Promise<Bet[]> {
+    const { rows } = await pool.query(
+      'SELECT * FROM bets WHERE bettor_address = $1 ORDER BY placed_at DESC',
+      [bettor_address],
+    );
+    return rows.map((row) => ({
+      ...row,
+      placed_at: new Date(row.placed_at),
+      claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
+    } as Bet));
+  },
+
+  async findBetsByMarket(market_id: string, bettor_address?: string): Promise<Bet[]> {
+    const values: unknown[] = [market_id];
+    let sql = 'SELECT * FROM bets WHERE market_id = $1';
+
+    if (bettor_address) {
+      values.push(bettor_address);
+      sql += ` AND bettor_address = $${values.length}`;
+    }
+
+    sql += ' ORDER BY placed_at DESC';
+
+    const { rows } = await pool.query(sql, values);
+    return rows.map((row) => ({
+      ...row,
+      placed_at: new Date(row.placed_at),
+      claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
+    } as Bet));
+  },
+
+  async updateMarketStatus(market_id: string, status: string): Promise<void> {
+    await pool.query(
+      'UPDATE markets SET status = $1, updated_at = NOW() WHERE market_id = $2',
+      [status, market_id],
+    );
+  },
+};
 
 let _db: DbAdapter | null = null;
 
@@ -34,6 +180,18 @@ function db(): DbAdapter {
 }
 
 export { db };
+
+/**
+ * Updates a market's status after validating the state transition.
+ * Reads the current status from the DB, validates, then applies the update.
+ */
+export async function updateMarketStatus(market_id: string, newStatus: string): Promise<void> {
+  const market = await db().findMarketById(market_id);
+  if (!market) throw AppError.notFound(`Market not found: ${market_id}`);
+  validateStatusTransition(market.status, newStatus);
+  await db().updateMarketStatus(market_id, newStatus);
+  await invalidateMarketCache(market_id);
+}
 
 export interface MarketFilters {
   status?: string;
@@ -192,26 +350,39 @@ export async function getMarkets(
       'ORDER BY scheduled_at DESC';
     const offset = (page - 1) * limit;
 
-    const rows = await pool.query(
-      `SELECT * FROM markets ${whereSql} ${orderBySql} LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
-      [...values, limit, offset],
-    );
+    try {
+      const rows = await pool.query(
+        `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
+         FROM markets m
+         LEFT JOIN (
+           SELECT market_id, COUNT(*) AS bet_count
+           FROM bets
+           GROUP BY market_id
+         ) b ON m.market_id = b.market_id
+         ${whereSql} ${orderBySql} LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+        [...values, limit, offset],
+      );
 
-    const countRows = await pool.query(
-      `SELECT COUNT(*) AS total FROM markets ${whereSql}`,
-      values,
-    );
+      const countRows = await pool.query(
+        `SELECT COUNT(*) AS total FROM markets ${whereSql}`,
+        values,
+      );
 
-    result = {
-      markets: rows.rows.map((row) => ({
-        ...row,
-        scheduled_at: new Date(row.scheduled_at),
-        created_at: new Date(row.created_at),
-        updated_at: new Date(row.updated_at),
-        resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
-      } as Market)),
-      total: Number(countRows.rows[0]?.total ?? 0),
-    };
+      result = {
+        markets: rows.rows.map((row) => ({
+          ...row,
+          scheduled_at: new Date(row.scheduled_at),
+          created_at: new Date(row.created_at),
+          updated_at: new Date(row.updated_at),
+          resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
+        } as Market)),
+        total: Number(countRows.rows[0]?.total ?? 0),
+      };
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      logger.error({ err }, 'MarketService.getMarkets: database query failed');
+      throw AppError.internalError('Failed to retrieve markets', ERROR_CODES.DATABASE_ERROR);
+    }
   }
 
   await cache.set(cacheKey, result, 30);
@@ -246,8 +417,11 @@ export async function getMarketById(market_id: string): Promise<MarketWithOdds> 
   const market = await db().findMarketById(market_id);
   if (!market) throw AppError.notFound(`Market not found: ${market_id}`);
 
-  const odds = await getMarketOdds(market_id);
-  const result: MarketWithOdds = { ...market, odds };
+  const odds = await calculateOdds(market_id);
+  const result: MarketWithOdds = {
+    ...market,
+    odds: { fighterA: odds.fighterA, fighterB: odds.fighterB, draw: odds.draw },
+  };
 
   await cache.set(cacheKey, result, 10);
   return result;
@@ -286,15 +460,20 @@ export async function getMarketOdds(market_id: string): Promise<MarketOdds> {
     total_pool = BigInt(market.total_pool);
   }
 
-  if (total_pool === 0n) return { odds_a: 0, odds_b: 0, odds_draw: 0 };
+  // No bets placed yet — return equal implied probabilities (33.33%) instead
+  // of dividing by zero, which would surface as NaN/Infinity → null in JSON.
+  if (total_pool === 0n) {
+    const EQUAL_PROBABILITY_BPS = Math.round(10000 / 3);
+    return { odds_a: EQUAL_PROBABILITY_BPS, odds_b: EQUAL_PROBABILITY_BPS, odds_draw: EQUAL_PROBABILITY_BPS };
+  }
 
   const fee = (total_pool * BigInt(market.fee_bps)) / 10000n;
   const net_pool = total_pool - fee;
 
   return {
-    odds_a: pool_a === 0n ? 0 : Number(net_pool * 10000n / pool_a),
-    odds_b: pool_b === 0n ? 0 : Number(net_pool * 10000n / pool_b),
-    odds_draw: pool_draw === 0n ? 0 : Number(net_pool * 10000n / pool_draw),
+    odds_a: pool_a === 0n ? 0 : Number((pool_a * 10000n) / total_pool),
+    odds_b: pool_b === 0n ? 0 : Number((pool_b * 10000n) / total_pool),
+    odds_draw: pool_draw === 0n ? 0 : Number((pool_draw * 10000n) / total_pool),
   };
 }
 
@@ -417,56 +596,29 @@ export async function getBetsByAddress(bettor_address: string): Promise<Bet[]> {
     return db().findBetsByAddress(bettor_address);
   }
 
-  const { rows } = await pool.query(
-    'SELECT * FROM bets WHERE bettor_address = $1 ORDER BY placed_at DESC',
-    [bettor_address],
-  );
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM bets WHERE bettor_address = $1 ORDER BY placed_at DESC',
+      [bettor_address],
+    );
 
-  return rows.map((row) => ({
-    ...row,
-    placed_at: new Date(row.placed_at),
-    claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
-  } as Bet));
+    return rows.map((row) => ({
+      ...row,
+      placed_at: new Date(row.placed_at),
+      claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
+    } as Bet));
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    logger.error({ err }, 'MarketService.getBetsByAddress: database query failed');
+    throw AppError.internalError('Failed to retrieve bets', ERROR_CODES.DATABASE_ERROR);
+  }
 }
 
 export async function getBettorStats(bettor_address: string): Promise<BettorStats> {
-  const bets = await getBetsByAddress(bettor_address);
-  const total_bets = bets.length;
-  const total_wagered_xlm = bets.reduce((sum, bet) => sum + Number(bet.amount) / 10_000_000, 0);
-  const total_winnings_xlm = bets.reduce(
-    (sum, bet) => sum + (bet.payout ? Number(bet.payout) / 10_000_000 : 0),
-    0,
-  );
+  const cacheKey = `bettor:${bettor_address}:stats`;
+  const cached = await cache.get<BettorStats>(cacheKey);
+  if (cached) return cached;
 
-  const winCount = bets.filter((bet) => bet.payout && BigInt(bet.payout) > 0n).length;
-  const win_rate = total_bets === 0 ? 0 : Math.round((winCount / total_bets) * 10000) / 100;
-
-  const favoriteFighterCounts = bets.reduce<Record<string, number>>((counts, bet) => {
-    counts[bet.side] = (counts[bet.side] || 0) + 1;
-    return counts;
-  }, {});
-
-  const favorite_fighter = Object.entries(favoriteFighterCounts).reduce<string | null>((winner, [side, count]) => {
-    if (winner === null) return side;
-    const currentCount = favoriteFighterCounts[winner] ?? 0;
-    return count > currentCount ? side : winner;
-  }, null);
-
-  return {
-    bettor_address,
-    total_bets,
-    total_wagered_xlm,
-    total_winnings_xlm,
-    win_rate,
-    favorite_fighter,
-  };
-}
-
-/**
- * Returns aggregate statistics for a bettor address.
- * Totals are computed in XLM. Returns zeroed stats when no bets exist.
- */
-export async function getBettorStats(bettor_address: string): Promise<BettorStats> {
   const bets = await getBetsByAddress(bettor_address);
   const total_bets = bets.length;
   const total_wagered_xlm = bets.reduce((sum, bet) => sum + Number(bet.amount) / 10_000_000, 0);
@@ -486,13 +638,17 @@ export async function getBettorStats(bettor_address: string): Promise<BettorStat
 
   const win_rate = total_bets === 0 ? 0 : Math.round((bets.filter((bet) => bet.claimed && bet.payout).length * 10000) / total_bets) / 100;
 
-  return {
+  const result: BettorStats = {
+    bettor_address,
     total_wagered_xlm,
     total_winnings_xlm,
     total_bets,
     win_rate,
     favorite_fighter,
   };
+
+  await cache.set(cacheKey, result, 60);
+  return result;
 }
 
 /**
@@ -517,12 +673,18 @@ export async function getBetsByMarket(
 
   sql += ' ORDER BY placed_at DESC';
 
-  const { rows } = await pool.query(sql, values);
-  return rows.map((row) => ({
-    ...row,
-    placed_at: new Date(row.placed_at),
-    claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
-  } as Bet));
+  try {
+    const { rows } = await pool.query(sql, values);
+    return rows.map((row) => ({
+      ...row,
+      placed_at: new Date(row.placed_at),
+      claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
+    } as Bet));
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    logger.error({ err }, 'MarketService.getBetsByMarket: database query failed');
+    throw AppError.internalError('Failed to retrieve bets for market', ERROR_CODES.DATABASE_ERROR);
+  }
 }
 
 /**
@@ -694,9 +856,15 @@ export async function getPlatformStats(): Promise<PlatformStats> {
 
   const marketsResult = await pool.query(
     "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as active, SUM(total_pool) as volume FROM markets"
-  );
+  ).catch((err) => {
+    logger.error({ err }, 'MarketService.getPlatformStats: markets query failed');
+    throw AppError.internalError('Failed to retrieve platform statistics', ERROR_CODES.DATABASE_ERROR);
+  });
 
-  const betsResult = await pool.query('SELECT COUNT(*) as total FROM bets');
+  const betsResult = await pool.query('SELECT COUNT(*) as total FROM bets').catch((err) => {
+    logger.error({ err }, 'MarketService.getPlatformStats: bets query failed');
+    throw AppError.internalError('Failed to retrieve platform statistics', ERROR_CODES.DATABASE_ERROR);
+  });
 
   const { total: totalMarkets, active: activeMarkets, volume: totalPoolStroops } = marketsResult.rows[0];
   const { total: totalBets } = betsResult.rows[0];
@@ -730,6 +898,12 @@ export async function bulkPauseMarkets(marketIds: string[]): Promise<BulkResult>
 
   for (const id of marketIds) {
     try {
+      const market = await db().findMarketById(id);
+      if (!market) {
+        result.failed.push({ id, reason: 'Market not found' });
+        continue;
+      }
+      validateStatusTransition(market.status, 'locked');
       const { rows } = await pool.query(
         `UPDATE markets SET status = 'locked', updated_at = NOW()
          WHERE market_id = $1 AND status = 'open'
@@ -743,7 +917,12 @@ export async function bulkPauseMarkets(marketIds: string[]): Promise<BulkResult>
         result.succeeded.push(id);
       }
     } catch (err) {
-      result.failed.push({ id, reason: err instanceof Error ? err.message : String(err) });
+      if (err instanceof AppError) {
+        result.failed.push({ id, reason: err.message });
+      } else {
+        logger.error({ err, id }, 'MarketService.bulkPauseMarkets: database query failed');
+        result.failed.push({ id, reason: 'Internal database error' });
+      }
     }
   }
 
@@ -794,7 +973,12 @@ export async function bulkCancelMarkets(
 
       result.succeeded.push(id);
     } catch (err) {
-      result.failed.push({ id, reason: err instanceof Error ? err.message : String(err) });
+      if (err instanceof AppError) {
+        result.failed.push({ id, reason: err.message });
+      } else {
+        logger.error({ err, id }, 'MarketService.bulkCancelMarkets: database query failed');
+        result.failed.push({ id, reason: 'Internal database error' });
+      }
     }
   }
 

@@ -1,5 +1,5 @@
 //! ============================================================
-//! BOXMEOUT — Shared Types and Errors
+//! BANKERCHANGER — Shared Types and Errors
 //! All contracts import from this crate.
 //! ============================================================
 

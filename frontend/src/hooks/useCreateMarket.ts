@@ -5,6 +5,7 @@ import type { TxStatus } from '../types';
 import type { CreateMarketParams } from '../services/wallet';
 import { buildContractTransaction, submitTransaction, NETWORK_PASSPHRASE } from '../../lib/stellar';
 import { getConnectedAddress } from '../services/wallet';
+import { xlmToStroops } from '../utils/xlmToStroops';
 
 export interface UseCreateMarketResult {
   createMarket: (params: CreateMarketParams) => Promise<void>;
@@ -13,12 +14,32 @@ export interface UseCreateMarketResult {
   error: string | null;
 }
 
-function xlmToStroops(xlm: number): bigint {
-  const [whole, frac = ''] = xlm.toString().split('.');
-  return BigInt(whole) * BigInt(10_000_000) + BigInt(frac.slice(0, 7).padEnd(7, '0'));
+/**
+ * Validates that scheduledAt is a valid ISO date string and represents a future time.
+ * @throws {Error} if date is invalid or not in the future
+ */
+function validateScheduledAt(scheduledAtStr: string): number {
+  // Attempt to parse the ISO date string
+  const date = new Date(scheduledAtStr);
+  
+  // Check if the date is valid (invalid dates are NaN, won't compare correctly)
+  if (isNaN(date.getTime())) {
+    throw new Error(`Invalid date format: "${scheduledAtStr}". Expected ISO 8601 format (e.g., "2025-02-15T14:30:00Z")`);
+  }
+  
+  // Check if the date is in the future
+  const now = Date.now();
+  if (date.getTime() <= now) {
+    throw new Error(`Scheduled time must be in the future. Got: ${scheduledAtStr} (${date.toISOString()})`);
+  }
+  
+  return date.getTime();
 }
 
 function buildArgs(params: CreateMarketParams): xdr.ScVal[] {
+  // Validate scheduledAt before building args (throws if invalid)
+  const scheduledAtMs = validateScheduledAt(params.scheduledAt);
+
   return [
     nativeToScVal(params.matchId, { type: 'string' }),
     nativeToScVal(params.fighterA, { type: 'string' }),
@@ -26,7 +47,7 @@ function buildArgs(params: CreateMarketParams): xdr.ScVal[] {
     nativeToScVal(params.weightClass, { type: 'string' }),
     nativeToScVal(params.venue, { type: 'string' }),
     nativeToScVal(params.titleFight, { type: 'bool' }),
-    nativeToScVal(BigInt(new Date(params.scheduledAt).getTime()), { type: 'u64' }),
+    nativeToScVal(BigInt(scheduledAtMs), { type: 'u64' }),
     nativeToScVal(xlmToStroops(params.minBetXlm), { type: 'i128' }),
     nativeToScVal(xlmToStroops(params.maxBetXlm), { type: 'i128' }),
     nativeToScVal(params.feeBps, { type: 'u32' }),
@@ -96,7 +117,15 @@ export function useCreateMarket(): UseCreateMarketResult {
           ? 'https://soroban-rpc.stellar.org'
           : 'https://soroban-testnet.stellar.org',
       );
-      const txResult = await server.getTransaction(hash);
+      
+      // Poll for transaction confirmation (max 30 seconds = 20 polls * 1.5s)
+      // Transaction may not be indexed immediately after submission
+      let txResult = await server.getTransaction(hash);
+      for (let i = 0; i < 20 && txResult.status === 'NOT_FOUND'; i++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        txResult = await server.getTransaction(hash);
+      }
+      
       if (txResult.status !== 'SUCCESS') throw new Error('Transaction did not succeed');
 
       const resultXdr = (txResult as any).returnValue

@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — Root Layout
+// BANKERCHANGER — Root Layout
 // Wraps all pages with Header and global providers.
 // ============================================================
 
@@ -14,12 +14,12 @@ const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
   title: {
-    default: 'BoxMeOut — Boxing Prediction Markets',
-    template: '%s — BoxMeOut',
+    default: 'BANKERCHANGER — Boxing Prediction Markets',
+    template: '%s — BANKERCHANGER',
   },
   description: 'Decentralized boxing prediction market powered by Stellar Soroban smart contracts.',
   openGraph: {
-    siteName: 'BoxMeOut',
+    siteName: 'BANKERCHANGER',
     type: 'website',
   },
 };
@@ -31,7 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }):
       <head>
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){var t=localStorage.getItem('boxmeout_theme');var d=t?t==='dark':window.matchMedia('(prefers-color-scheme: dark)').matches;if(d)document.documentElement.classList.add('dark');})();`,
+            __html: `(function(){var t=localStorage.getItem('bankerchanger_theme');var d=t?t==='dark':window.matchMedia('(prefers-color-scheme: dark)').matches;if(d)document.documentElement.classList.add('dark');})();`,
           }}
         />
       </head>

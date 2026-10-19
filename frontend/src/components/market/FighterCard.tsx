@@ -1,7 +1,7 @@
 'use client';
 
 // ============================================================
-// BOXMEOUT — FighterCard Component
+// BANKERCHANGER — FighterCard Component
 // Used on the market detail page to display each fighter.
 // ============================================================
 

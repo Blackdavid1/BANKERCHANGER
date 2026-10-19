@@ -1,6 +1,8 @@
 # API Rate Limits
 
-BoxMeOut enforces rate limits on all API endpoints to protect against abuse and ensure fair access for all consumers.
+BANKERCHANGER enforces rate limits on all API endpoints to protect against abuse and ensure fair access for all consumers.
+
+> **Source of truth:** Rate limits are defined in code via `rateLimit()` calls in [`backend/src/index.ts`](../backend/src/index.ts) and [`backend/src/routes/auth.routes.ts`](../backend/src/routes/auth.routes.ts). This document is kept in sync manually — when updating rate limits, please update both the code and this document.
 
 ## Rate Limit Overview
 
@@ -9,10 +11,13 @@ Rate limits are enforced using Redis-backed counters. Each route group has its o
 | Route Prefix | Window | Max Requests | Keyed By | Notes |
 |-------------|--------|-------------|----------|-------|
 | `/auth` | 60 seconds | 10 | IP address | Login, registration, password reset |
+| `/auth/forgot-password` | 15 minutes | 5 | IP address | Password reset request (stricter override) |
+| `/auth/reset-password` | 15 minutes | 10 | IP address | Password reset submission (stricter override) |
+| `/auth/2fa/verify` | 15 minutes | 5 | IP address | 2FA verification (stricter override) |
 | `/api` | 60 seconds | 60 | IP address | Public API (markets, stats, portfolio) |
 | `/api/oracle` | 60 seconds | 10 | IP address | Oracle report submission (stricter) |
 | `/api/admin` | 60 seconds | 20 | IP address | Admin operations |
-| `/trading/bet` | 60 seconds | 60 | User ID | Bet placement |
+| `/trading` | 60 seconds | 60 | User ID | Bet placement and trading endpoints |
 | `/wallet/withdraw` | 60 seconds | 5 | User ID | Withdrawal requests |
 
 ## Rate Limit Headers
@@ -62,7 +67,7 @@ Authenticated endpoints (trading, withdrawals) are rate-limited per user ID. Thi
 
 ```bash
 # Normal request
-curl -i https://api.boxmeout.io/api/markets
+curl -i https://api.bankerchanger.io/api/markets
 
 # Response headers (normal):
 # HTTP/1.1 200 OK

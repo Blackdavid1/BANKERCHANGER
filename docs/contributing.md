@@ -1,6 +1,6 @@
-# Contributing to BoxMeOut
+# Contributing to BANKERCHANGER
 
-Thank you for your interest in contributing to BoxMeOut! This document provides guidelines for development and deployment.
+Thank you for your interest in contributing to BANKERCHANGER! This document provides guidelines for development and deployment.
 
 ## Table of Contents
 

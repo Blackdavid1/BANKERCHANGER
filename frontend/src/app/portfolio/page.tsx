@@ -1,7 +1,7 @@
 'use client';
 
 // ============================================================
-// BOXMEOUT — Portfolio Page (/portfolio)
+// BANKERCHANGER — Portfolio Page (/portfolio)
 // ============================================================
 
 import { useMemo, useCallback, useState, useEffect } from 'react';
@@ -49,8 +49,8 @@ function BettorStats({ totalStaked, totalWon, totalLost, pendingClaimsCount }: B
 
 export default function PortfolioPage(): JSX.Element {
   const { isConnected } = useWallet();
-  const { portfolio, isLoading, claimTxStatus, claimWinnings, claimRefund } = usePortfolio();
   const { markets } = useMarkets();
+  const { portfolio, performance, isLoading, claimTxStatus, claimWinnings, claimRefund } = usePortfolio(markets);
   const [claimingAll, setClaimingAll] = useState(false);
   const toast = useToast();
 
@@ -60,13 +60,16 @@ export default function PortfolioPage(): JSX.Element {
   );
 
   const allBets: Bet[] = useMemo(() => {
+    if (paginatedBets && paginatedBets.length > 0) {
+      return paginatedBets;
+    }
     if (!portfolio) return [];
     return [
       ...portfolio.pending_claims,
       ...portfolio.active_bets,
       ...portfolio.past_bets,
     ];
-  }, [portfolio]);
+  }, [paginatedBets, portfolio]);
 
   const handleClaimAll = useCallback(async () => {
     if (!portfolio || claimingAll) return;
@@ -132,11 +135,29 @@ export default function PortfolioPage(): JSX.Element {
         )}
       </div>
 
+      <section aria-label="Open position performance" className="grid grid-cols-1 sm:grid-cols-3 gap-3 rounded-xl border border-gray-800 bg-gray-900 p-4">
+        <div>
+          <p className="text-xs text-gray-400">Total Invested</p>
+          <p className="mt-1 text-lg font-semibold text-white">{performance.totalInvestedXlm.toFixed(2)} XLM</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-400">Current Value</p>
+          <p className="mt-1 text-lg font-semibold text-white">{performance.currentValueXlm.toFixed(2)} XLM</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-400">Unrealized P&amp;L</p>
+          <p className={`mt-1 text-lg font-semibold ${performance.unrealizedPnlXlm >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            {performance.unrealizedPnlXlm >= 0 ? '+' : ''}{performance.unrealizedPnlXlm.toFixed(2)} XLM
+            <span className="ml-2 text-sm">({performance.unrealizedPnlPercent >= 0 ? '+' : ''}{performance.unrealizedPnlPercent.toFixed(1)}%)</span>
+          </p>
+        </div>
+      </section>
+
       {/* Stats */}
       <BettorStats
-        totalStaked={portfolio!.total_staked_xlm}
-        totalWon={portfolio!.total_won_xlm}
-        totalLost={portfolio!.total_lost_xlm}
+        totalStaked={portfolio!.total_staked_xlm ?? 0}
+        totalWon={portfolio!.total_won_xlm ?? 0}
+        totalLost={portfolio!.total_lost_xlm ?? 0}
         pendingClaimsCount={pendingCount}
       />
 
@@ -149,6 +170,17 @@ export default function PortfolioPage(): JSX.Element {
           onClaim={claimWinnings}
           onRefund={claimRefund}
         />
+        {hasNextPage && (
+          <div className="mt-6 flex justify-center">
+            <button
+              onClick={loadNextPage}
+              disabled={isFetchingNextPage}
+              className="px-6 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-sm font-semibold text-white transition-colors border border-gray-700 hover:border-gray-600"
+            >
+              {isFetchingNextPage ? 'Loading more bets…' : 'Load more'}
+            </button>
+          </div>
+        )}
       </section>
     </main>
   );

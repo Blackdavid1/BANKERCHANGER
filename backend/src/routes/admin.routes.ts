@@ -1,8 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
 import { AppError } from '../utils/AppError';
-import { isSessionRevoked } from '../services/auth.service';
-import { getEnv } from '../config/env';
 import { flagDispute, investigateDispute, cancelMarket, resolveDispute, listDisputes, processRefunds, bulkPause, bulkCancel } from '../api/controllers/AdminController';
 import {
   logExportAudit,
@@ -13,11 +10,10 @@ import {
 } from '../services/export.service';
 import { sendExportReadyEmail } from '../services/email.service';
 import { flushOracleWhitelistCache } from '../oracle/OracleService';
+import { requireAdmin } from '../middleware/requireAdminJwt.middleware';
+import { auditLog } from '../services/auditLog.service';
 
 const router = Router();
-
-const env = getEnv();
-const JWT_SECRET = env.JWT_SECRET;
 
 /**
  * @swagger
@@ -25,42 +21,6 @@ const JWT_SECRET = env.JWT_SECRET;
  *   name: Admin
  *   description: Admin-only operations
  */
-
-// ---------------------------------------------------------------------------
-// Admin middleware — verifies JWT, checks admin role and session revocation
-// ---------------------------------------------------------------------------
-async function requireAdmin(req: Request, _res: Response, next: NextFunction): Promise<void> {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      throw new AppError(401, 'Missing or invalid Authorization header');
-    }
-
-    const token = authHeader.slice(7);
-    const payload = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
-
-    if (payload.type !== 'access') {
-      throw new AppError(401, 'Invalid token type');
-    }
-
-    if (payload.role !== 'admin') {
-      throw new AppError(403, 'Forbidden: admin role required');
-    }
-
-    const userId = payload.sub as string;
-    const sessionVersion: number = payload.sv ?? 0;
-
-    // Check Redis tombstone — set on password reset
-    const revoked = await isSessionRevoked(userId, sessionVersion);
-    if (revoked) throw new AppError(401, 'Session has been invalidated');
-
-    (req as unknown as Record<string, unknown>).userId = userId;
-    (req as unknown as Record<string, unknown>).sessionVersion = sessionVersion;
-    next();
-  } catch (err) {
-    next(err instanceof AppError ? err : new AppError(401, 'Invalid or expired token'));
-  }
-}
 
 /**
  * @swagger
@@ -480,9 +440,18 @@ router.post('/export/request', requireAdmin, async (req: Request, res: Response,
  *       500:
  *         description: Redis error
  */
-router.post('/oracle/refresh-whitelist', requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
+router.post('/oracle/refresh-whitelist', requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const whitelist = (process.env.ORACLE_WHITELIST ?? '').split(',').map((value) => value.trim()).filter(Boolean);
     await flushOracleWhitelistCache();
+    const adminId = ((req as unknown as Record<string, unknown>).userId as string | undefined) ?? null;
+    await auditLog.write({
+      adminId,
+      action: 'oracle_whitelist_refresh',
+      targetId: 'oracle_whitelist',
+      beforeState: { addresses: whitelist },
+      afterState: { addresses: whitelist },
+    });
     res.json({ message: 'Oracle whitelist cache flushed. New whitelist will be loaded on next verification.' });
   } catch (err) {
     next(err);

@@ -93,6 +93,56 @@ describe('distributedLock', () => {
     });
   });
 
+  describe('lock TTL expiry', () => {
+    it('should allow second caller to acquire lock after TTL expires', async () => {
+      // First acquisition succeeds with a very short TTL
+      (redis.set as jest.Mock).mockResolvedValueOnce('OK');
+      const lock1 = await acquireLock({ key: 'test-lock', ttl: 1 });
+      expect(lock1).not.toBeNull();
+
+      // Simulate TTL expiry: second caller can now acquire the same lock
+      (redis.set as jest.Mock).mockResolvedValueOnce('OK');
+      const lock2 = await acquireLock({ key: 'test-lock', ttl: 60 });
+      expect(lock2).not.toBeNull();
+      expect(lock2!.identifier).not.toBe(lock1!.identifier);
+
+      // First lock's release should detect it no longer owns the lock
+      (redis.eval as jest.Mock).mockResolvedValueOnce(0);
+      await lock1!.release();
+
+      // Second lock's release should work normally
+      (redis.eval as jest.Mock).mockResolvedValueOnce(1);
+      await lock2!.release();
+    });
+
+    it('should allow a third caller to acquire after both previous locks expire', async () => {
+      // First lock acquired
+      (redis.set as jest.Mock).mockResolvedValueOnce('OK');
+      const lock1 = await acquireLock({ key: 'shared-lock', ttl: 1 });
+      expect(lock1).not.toBeNull();
+
+      // First lock expires, second caller acquires
+      (redis.set as jest.Mock).mockResolvedValueOnce('OK');
+      const lock2 = await acquireLock({ key: 'shared-lock', ttl: 1 });
+      expect(lock2).not.toBeNull();
+
+      // Second lock also expires, third caller acquires
+      (redis.set as jest.Mock).mockResolvedValueOnce('OK');
+      const lock3 = await acquireLock({ key: 'shared-lock', ttl: 60 });
+      expect(lock3).not.toBeNull();
+
+      // First two releases should report lock not owned
+      (redis.eval as jest.Mock).mockResolvedValueOnce(0);
+      await lock1!.release();
+      (redis.eval as jest.Mock).mockResolvedValueOnce(0);
+      await lock2!.release();
+
+      // Third release should succeed
+      (redis.eval as jest.Mock).mockResolvedValueOnce(1);
+      await lock3!.release();
+    });
+  });
+
   describe('withDistributedLock', () => {
     it('should execute job when lock is acquired', async () => {
       (redis.set as jest.Mock).mockResolvedValue('OK');

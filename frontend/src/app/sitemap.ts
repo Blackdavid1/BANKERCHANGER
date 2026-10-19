@@ -1,7 +1,7 @@
 import { MetadataRoute } from 'next';
 import { fetchMarkets } from '@/services/api';
 
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://boxmeout.io';
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://bankerchanger.io';
 
 export const revalidate = 3600; // Revalidate every hour
 
@@ -38,9 +38,10 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     const { markets } = await fetchMarkets({ status: 'open' }, { limit: 1000 });
     
     markets.forEach((market) => {
+      const updatedAt = market.updated_at ? new Date(market.updated_at) : undefined;
       entries.push({
         url: `${SITE_URL}/markets/${market.id}`,
-        lastModified: market.created_at ? new Date(market.created_at) : new Date(),
+        ...(updatedAt && !Number.isNaN(updatedAt.getTime()) ? { lastModified: updatedAt } : {}),
         changeFrequency: 'hourly',
         priority: 0.8,
       });

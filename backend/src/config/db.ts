@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 
-const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://boxmeout:boxmeout@localhost:5432/boxmeout';
+const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger';
 
 const parseNumber = (value: string | undefined, defaultValue: number): number => {
   if (value) {

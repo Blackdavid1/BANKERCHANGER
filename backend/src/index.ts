@@ -18,16 +18,26 @@ import { pool } from "./config/db";
 import { redis } from "./config/redis";
 import authRouter from "./routes/auth.routes";
 import marketRouter from "./routes/market.routes";
+import governanceRouter from "./routes/governance.routes";
 import adminRouter from "./routes/admin.routes";
+import usersRouter from "./routes/users.routes";
+
+import engagementRouter from "./routes/engagement.routes";
 import { getPortfolio, getPlatformStats } from "./api/controllers/MarketController";
 import claimsRouter from "./routes/bet.routes";
 import { startAutoResolutionCron, startAutoLockCron } from "./cron/autoResolution.cron";
 import { startCleanupCron } from "./cron/cleanup.cron";
-import { initActivityFeed } from "./websocket/realtime";
+import { initActivityFeed, getActivityFeed } from "./websocket/realtime";
+import { engagementService } from "./services/engagement.service";
 import { register, httpRequestDuration, httpRequestsTotal } from "./services/metrics.service";
+
+import { setDbAdapter, defaultDbAdapter } from "./services/MarketService";
 
 // Initialise Sentry before any other code (captures unhandled rejections/exceptions)
 initSentry(env.SENTRY_DSN, env.NODE_ENV);
+
+// Wire default production DbAdapter for MarketService
+setDbAdapter(defaultDbAdapter);
 
 const app = express();
 
@@ -63,15 +73,36 @@ app.use((req, res, next) => {
 });
 
 // Routes
+// Public health endpoint (Issue #682) — returns only { status, version, timestamp }
 app.get("/health", async (_req, res) => {
   try {
     await pool.query("SELECT 1");
     await redis.ping();
     res.json({
-      status: "ok",
+      status: "healthy",
+      version,
+      timestamp: new Date().toISOString(),
+    });
+  } catch {
+    res.status(503).json({
+      status: "unhealthy",
+      version,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Detailed health endpoint (Issue #682) — restricted to admin JWT
+app.get("/health/detailed", requireAdminJwt, async (_req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    await redis.ping();
+    res.json({
+      status: "healthy",
+      version,
+      timestamp: new Date().toISOString(),
       db: "connected",
       redis: "connected",
-      version,
       dbPool: {
         totalCount: pool.totalCount,
         idleCount: pool.idleCount,
@@ -79,7 +110,11 @@ app.get("/health", async (_req, res) => {
       },
     });
   } catch {
-    res.status(503).json({ status: "error" });
+    res.status(503).json({
+      status: "unhealthy",
+      version,
+      timestamp: new Date().toISOString(),
+    });
   }
 });
 
@@ -96,10 +131,13 @@ app.use(
 
 app.use("/auth", authRouter);
 app.use("/api/markets", marketRouter);
+app.use("/api/governance", governanceRouter);
+app.use("/api/engagement", engagementRouter);
 app.use("/api/claims", claimsRouter);
+app.use("/api/bets", claimsRouter);
 app.get("/api/stats", getPlatformStats);
 app.get("/api/portfolio/:address", getPortfolio);
-app.use("/api/bets", claimsRouter);
+app.use("/api/users", usersRouter);
 app.use("/api/admin", adminRouter);
 app.post("/trading/bet", (_req, res) => res.json({ ok: true }));
 app.post("/wallet/withdraw", (_req, res) => res.json({ ok: true }));
@@ -142,7 +180,7 @@ const PORT = env.PORT;
 const server = app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
   if (env.NODE_ENV === 'development' || env.ENABLE_SWAGGER) {
-    logger.info(`Swagger UI available at http://localhost:${PORT}/docs`);
+    logger.info(`Swagger UI available at http://localhost:${PORT}/api/docs`);
   }
   startAutoResolutionCron();
   startAutoLockCron();
@@ -170,5 +208,17 @@ const server = app.listen(PORT, () => {
 })();
 
 initActivityFeed(server);
+
+// Bridge engagement leaderboard rank changes onto the WebSocket layer so
+// subscribed clients get real-time rank updates (issues #516, #517).
+
+// subscribed clients get real-time rank updates.
+engagementService.setRankUpdateListener((updates) => {
+  try {
+    getActivityFeed().emitLeaderboardRankUpdate(updates);
+  } catch (err) {
+    logger.warn({ err }, "Failed to emit leaderboard rank update");
+  }
+});
 
 export default app;

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import request from 'supertest';
 import app from '../server';
-import { db, upsertInvoice, getInvoices } from '../db';
+import { db, upsertInvoice, getInvoices, getDatabase } from '../db';
 import { processEvent } from '../poller';
 
 // Clear the DB before tests
@@ -10,7 +10,9 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  db.close();
+  // Close the database connection
+  const database = getDatabase();
+  database.close();
 });
 
 describe('Indexer Event Processing', () => {

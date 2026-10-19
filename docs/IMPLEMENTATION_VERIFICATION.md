@@ -1,6 +1,6 @@
 # Implementation Verification — Issues #33, #34, #35
 
-This document verifies the implementation status of three security and query features in the BOXMEOUT market contract.
+This document verifies the implementation status of three security and query features in the BANKERCHANGER market contract.
 
 ## Issue #33 — Reentrancy Guard for claim_winnings()
 

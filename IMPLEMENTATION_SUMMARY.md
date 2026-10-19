@@ -251,7 +251,7 @@ b2fc5d09 chore: update npm scripts to use drizzle-kit for migrations
 # Implementation Summary: Issues #732-735
 
 ## Overview
-Successfully implemented all four backend features for the BOXMEOUT Stellar DApp oracle and contract interaction system. All changes are in the branch `feat/issues-732-733-734-735`.
+Successfully implemented all four backend features for the BANKERCHANGER Stellar DApp oracle and contract interaction system. All changes are in the branch `feat/issues-732-733-734-735`.
 
 ## Issues Implemented
 

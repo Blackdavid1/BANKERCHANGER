@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — BlockchainEvent Database Model
+// BANKERCHANGER — BlockchainEvent Database Model
 // Raw events ingested by the indexer before processing.
 // ============================================================
 

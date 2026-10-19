@@ -5,48 +5,22 @@ import { AppError } from '../../src/utils/AppError';
 
 const SECRET = 'test-secret';
 
-// Mock auth.service before importing routes
+// Mock auth.service before importing middleware
 const mockIsSessionRevoked = jest.fn<(userId: string, sessionVersion: number) => Promise<boolean>>();
 jest.mock('../../src/services/auth.service', () => ({
   isSessionRevoked: mockIsSessionRevoked,
 }));
 
+// Mock env before importing middleware
+jest.mock('../../src/config/env', () => ({
+  getEnv: jest.fn(() => ({
+    JWT_SECRET: SECRET,
+    ADMIN_JWT_SECRET: SECRET,
+  })),
+}));
+
 // Import after mocking
-import { Router } from 'express';
-
-function createRequireAdmin() {
-  return async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith('Bearer ')) {
-        throw new AppError(401, 'Missing or invalid Authorization header');
-      }
-
-      const token = authHeader.slice(7);
-      const payload = jwt.verify(token, SECRET) as jwt.JwtPayload;
-
-      if (payload.type !== 'access') {
-        throw new AppError(401, 'Invalid token type');
-      }
-
-      if (payload.role !== 'admin') {
-        throw new AppError(403, 'Forbidden: admin role required');
-      }
-
-      const userId = payload.sub as string;
-      const sessionVersion: number = payload.sv ?? 0;
-
-      const revoked = await mockIsSessionRevoked(userId, sessionVersion);
-      if (revoked) throw new AppError(401, 'Session has been invalidated');
-
-      (req as unknown as Record<string, unknown>).userId = userId;
-      (req as unknown as Record<string, unknown>).sessionVersion = sessionVersion;
-      next();
-    } catch (err) {
-      next(err instanceof AppError ? err : new AppError(401, 'Invalid or expired token'));
-    }
-  };
-}
+import { requireAdmin } from '../../src/middleware/requireAdminJwt.middleware';
 
 function makeReqRes(authHeader?: string) {
   const req = {
@@ -58,11 +32,8 @@ function makeReqRes(authHeader?: string) {
 }
 
 describe('requireAdmin middleware for admin routes', () => {
-  const requireAdmin = createRequireAdmin();
-
   beforeEach(() => {
     jest.clearAllMocks();
-    process.env.JWT_SECRET = SECRET;
     mockIsSessionRevoked.mockResolvedValue(false);
   });
 

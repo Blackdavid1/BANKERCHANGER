@@ -1,6 +1,6 @@
 # Observability Guide
 
-BoxMeOut exports Prometheus metrics, structured logs, and Sentry error tracking for production monitoring.
+BANKERCHANGER exports Prometheus metrics, structured logs, and Sentry error tracking for production monitoring.
 
 ## Prometheus Metrics
 
@@ -62,7 +62,7 @@ Default `prom-client` metrics are also collected, including:
 
 ```yaml
 scrape_configs:
-  - job_name: 'boxmeout'
+  - job_name: 'bankerchanger'
     scrape_interval: 15s
     static_configs:
       - targets: ['backend:3001']
@@ -71,7 +71,7 @@ scrape_configs:
 
 ## Structured Logging
 
-BoxMeOut uses [Pino](https://getpino.io/) for structured JSON logging.
+BANKERCHANGER uses [Pino](https://getpino.io/) for structured JSON logging.
 
 **Log levels:** `trace`, `debug`, `info`, `warn`, `error`, `fatal`
 
@@ -101,3 +101,16 @@ BoxMeOut uses [Pino](https://getpino.io/) for structured JSON logging.
 | Low cache hit rate | `rate(cache_hits_total[5m]) / (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m]))` | < 50% |
 | DB query latency | `histogram_quantile(0.95, rate(db_query_duration_seconds_bucket[5m]))` | > 500ms |
 | WebSocket overload | `websocket_active_connections` | > 1000 |
+| Indexer queue overflow | `indexer_queue_depth` | > 8000 for 60s |
+| Indexer ledger lag | `indexer_ledger_lag` | > 1000 for 5m |
+
+### Indexer Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `indexer_queue_overflow_total` | Counter | — | Total events dropped due to WebSocket event broadcast queue overflow |
+| `indexer_queue_depth` | Gauge | — | Current queued events awaiting broadcast in indexer |
+| `indexer_ledger_lag` | Gauge | — | Difference between latest network ledger and last processed ledger |
+| `indexer_db_pool_size` | Gauge | — | Total PostgreSQL connections in indexer connection pool |
+| `indexer_db_pool_idle` | Gauge | — | Idle PostgreSQL connections in indexer connection pool |
+

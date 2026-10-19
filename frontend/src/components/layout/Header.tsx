@@ -8,7 +8,7 @@ import { ThemeToggle } from './ThemeToggle';
 
 const NETWORK = process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? 'testnet';
 const IS_MAINNET = NETWORK === 'mainnet';
-const BANNER_KEY = 'boxmeout_mainnet_banner_dismissed';
+const BANNER_KEY = 'bankerchanger_mainnet_banner_dismissed';
 
 const NAV_LINKS: Array<{ href: string; label: string; adminOnly?: boolean }> = [
   { href: '/', label: 'Home' },
@@ -37,7 +37,7 @@ export function Header(): JSX.Element {
 
   // Matches /create/page.tsx admin logic
   const connectedAddress =
-    typeof window === 'undefined' ? null : sessionStorage.getItem('boxmeout_wallet_address');
+    typeof window === 'undefined' ? null : sessionStorage.getItem('bankerchanger_wallet_address');
   const adminAddresses = (process.env.NEXT_PUBLIC_ADMIN_ADDRESSES ?? '')
     .split(',')
     .map((a) => a.trim())
@@ -63,7 +63,7 @@ export function Header(): JSX.Element {
       <header className="sticky top-0 z-40 bg-white dark:bg-gray-950 border-b border-gray-200 dark:border-gray-800 transition-colors">
         <div className="max-w-6xl mx-auto px-4 h-14 flex items-center gap-6">
           <Link href="/" className="font-black text-amber-500 text-xl tracking-tight">
-            BOXMEOUT
+            BANKERCHANGER
           </Link>
 
           {/* Desktop nav */}

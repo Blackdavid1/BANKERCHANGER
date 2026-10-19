@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — API Client (lib)
+// BANKERCHANGER — API Client (lib)
 // Typed fetch wrappers for all backend REST endpoints.
 // Base URL from process.env.NEXT_PUBLIC_API_URL
 // ============================================================

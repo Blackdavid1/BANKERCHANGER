@@ -13,7 +13,7 @@ const SENSITIVE_PATHS = [
  * Request logging middleware with structured format.
  * Development: human-readable format
  * Production: JSON format for log aggregation
- * Masks request body for sensitive paths
+ * Masks request body for sensitive paths and redacts Authorization header
  */
 export function requestLogging(req: Request, res: Response, next: NextFunction): void {
   const startTime = Date.now();
@@ -30,6 +30,10 @@ export function requestLogging(req: Request, res: Response, next: NextFunction):
     const isSensitive = SENSITIVE_PATHS.some((p) => path.startsWith(p));
     const body = isSensitive ? '[REDACTED]' : JSON.stringify(req.body);
 
+    // Redact Authorization header to prevent token leakage
+    const authHeader = req.get('authorization');
+    const displayAuthHeader = authHeader ? 'Bearer [REDACTED]' : undefined;
+
     const logData = {
       method,
       path,
@@ -37,6 +41,7 @@ export function requestLogging(req: Request, res: Response, next: NextFunction):
       responseTime: `${responseTime}ms`,
       ip,
       ...(isSensitive && { body }),
+      ...(displayAuthHeader && { authorization: displayAuthHeader }),
     };
 
     if (process.env.NODE_ENV === 'production') {

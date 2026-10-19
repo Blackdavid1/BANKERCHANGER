@@ -8,11 +8,11 @@
 
 ## Reporting a Vulnerability
 
-We take the security of BoxMeOut seriously. If you believe you have found a security vulnerability, please report it to us as described below.
+We take the security of BANKERCHANGER seriously. If you believe you have found a security vulnerability, please report it to us as described below.
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, please report them via email to **security@boxmeout.app** (or the maintainer's email listed in the repository's commit history).
+Instead, please report them via email to **security@bankerchanger.app** (or the maintainer's email listed in the repository's commit history).
 
 You should receive a response within 48 hours. If you do not, please follow up to ensure your message was received.
 

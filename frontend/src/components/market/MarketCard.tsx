@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — MarketCard Component
+// BANKERCHANGER — MarketCard Component
 // Compact card for the home page market grid.
 // Contributors: implement the JSX body.
 // ============================================================
@@ -13,10 +13,12 @@ import { ScheduledTimeDisplay } from '../ui/ScheduledTimeDisplay';
 
 interface MarketCardProps {
   market: Market;
+  isNew?: boolean;
 }
 
-export function MarketCard({ market }: MarketCardProps): JSX.Element {
+export function MarketCard({ market, isNew = false }: MarketCardProps): JSX.Element {
   const totalXlm = Math.floor(parseInt(market.total_pool, 10) / 1e7).toLocaleString();
+  const betCount = (market as any).bet_count ? Number((market as any).bet_count).toLocaleString() : '0';
 
   return (
     <Link
@@ -33,6 +35,11 @@ export function MarketCard({ market }: MarketCardProps): JSX.Element {
       {/* Badges */}
       <div className="flex flex-wrap items-center gap-2">
         <MarketStatusBadge status={market.status} />
+        {isNew && (
+          <span className="text-xs text-green-300 bg-green-400/10 px-2 py-0.5 rounded-full">
+            New!
+          </span>
+        )}
         <span className="text-xs text-gray-400 bg-gray-800 px-2 py-0.5 rounded-full">{market.weight_class}</span>
         {market.title_fight && (
           <span className="text-xs text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded-full">🏆 Title Fight</span>
@@ -54,7 +61,10 @@ export function MarketCard({ market }: MarketCardProps): JSX.Element {
           <ScheduledTimeDisplay scheduledAt={market.scheduled_at} />
           <CountdownTimer targetDate={market.scheduled_at} label="Starts in" />
         </div>
-        <span className="text-right">{totalXlm} XLM pooled</span>
+        <div className="flex flex-col items-end gap-1">
+          <span className="text-right">{totalXlm} XLM pooled</span>
+          <span className="text-right">🥊 {betCount} bets</span>
+        </div>
       </div>
     </Link>
   );

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS bets (
   side             TEXT        NOT NULL,
   amount           NUMERIC     NOT NULL,
   amount_xlm       NUMERIC     NOT NULL DEFAULT 0,
+  odds_snapshot    JSONB,
   placed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   claimed          BOOLEAN     NOT NULL DEFAULT FALSE,
   claimed_at       TIMESTAMPTZ,
@@ -61,6 +62,23 @@ CREATE TABLE IF NOT EXISTS indexer_checkpoints (
   last_processed_ledger   INTEGER     NOT NULL,
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS indexer_ledger_ranges (
+  id             SERIAL PRIMARY KEY,
+  start_ledger   INTEGER     NOT NULL,
+  end_ledger     INTEGER     NOT NULL,
+  processed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (start_ledger, end_ledger)
+);
+CREATE INDEX IF NOT EXISTS indexer_ledger_ranges_start_idx ON indexer_ledger_ranges (start_ledger);
+
+CREATE TABLE IF NOT EXISTS registered_oracles (
+  oracle_address   TEXT        PRIMARY KEY,
+  public_key       TEXT        NOT NULL,
+  active           BOOLEAN     NOT NULL DEFAULT TRUE,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS registered_oracles_active_idx ON registered_oracles (active);
 
 CREATE TABLE IF NOT EXISTS oracle_reports (
   id               SERIAL PRIMARY KEY,
@@ -94,4 +112,69 @@ CREATE TABLE IF NOT EXISTS notification_jobs (
   status           TEXT        NOT NULL DEFAULT 'pending',
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   processed_at     TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS user_streaks (
+  id                   SERIAL PRIMARY KEY,
+  address              TEXT        NOT NULL,
+  current_streak       INTEGER     NOT NULL DEFAULT 0,
+  best_streak          INTEGER     NOT NULL DEFAULT 0,
+  total_predictions    INTEGER     NOT NULL DEFAULT 0,
+  last_prediction_date DATE,
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT user_streaks_address_unique UNIQUE (address)
+);
+
+CREATE TABLE IF NOT EXISTS achievements (
+  id            SERIAL PRIMARY KEY,
+  code          TEXT        NOT NULL,
+  name          TEXT        NOT NULL,
+  description   TEXT        NOT NULL,
+  category      TEXT        NOT NULL DEFAULT 'general',
+  threshold     INTEGER     NOT NULL DEFAULT 0,
+  reward_label  TEXT        NOT NULL DEFAULT '',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT achievements_code_unique UNIQUE (code)
+);
+
+CREATE TABLE IF NOT EXISTS user_achievements (
+  id               SERIAL PRIMARY KEY,
+  address          TEXT        NOT NULL,
+  achievement_id   INTEGER     NOT NULL REFERENCES achievements(id) ON DELETE CASCADE,
+  earned_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT user_achievements_address_achievement_unique UNIQUE (address, achievement_id)
+);
+
+CREATE TABLE IF NOT EXISTS referrals (
+  id                SERIAL PRIMARY KEY,
+  referrer_address  TEXT        NOT NULL,
+  referred_address  TEXT        NOT NULL,
+  referral_code     TEXT        NOT NULL,
+  status            TEXT        NOT NULL DEFAULT 'active',
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  converted_at      TIMESTAMPTZ,
+  CONSTRAINT referrals_referred_address_unique UNIQUE (referred_address)
+);
+
+CREATE TABLE IF NOT EXISTS referral_payouts (
+  id                SERIAL PRIMARY KEY,
+  referrer_address  TEXT        NOT NULL,
+  referred_address  TEXT        NOT NULL,
+  level             INTEGER     NOT NULL DEFAULT 1,
+  amount            NUMERIC     NOT NULL DEFAULT 0,
+  source_amount     NUMERIC     NOT NULL DEFAULT 0,
+  rate_bps          INTEGER     NOT NULL DEFAULT 0,
+  status            TEXT        NOT NULL DEFAULT 'pending',
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS user_notifications (
+  id          SERIAL PRIMARY KEY,
+  address     TEXT        NOT NULL,
+  type        TEXT        NOT NULL,
+  title       TEXT        NOT NULL,
+  body        TEXT        NOT NULL,
+  payload     JSONB       NOT NULL DEFAULT '{}',
+  read        BOOLEAN     NOT NULL DEFAULT FALSE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

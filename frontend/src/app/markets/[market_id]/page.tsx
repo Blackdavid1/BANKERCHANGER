@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — Market Detail Page (/markets/[market_id])
+// BANKERCHANGER — Market Detail Page (/markets/[market_id])
 // ============================================================
 
 import type { Metadata } from 'next';
@@ -14,33 +14,34 @@ interface MarketDetailPageProps {
 export async function generateMetadata({ params }: MarketDetailPageProps): Promise<Metadata> {
   try {
     const market = await fetchMarketById(params.market_id);
-    const title = `${market.fighter_a} vs ${market.fighter_b}`;
-    const description = `Bet on ${market.fighter_a} vs ${market.fighter_b} — ${market.weight_class}${market.title_fight ? ' Title Fight' : ''} on BoxMeOut.`;
-    const url = `${process.env.NEXT_PUBLIC_BASE_URL || 'https://boxmeout.com'}/markets/${params.market_id}`;
-    const imageUrl = `${process.env.NEXT_PUBLIC_BASE_URL || 'https://boxmeout.com'}/og-image.png`;
+    const base = process.env.NEXT_PUBLIC_BASE_URL || 'https://bankerchanger.com';
+    const url = `${base}/markets/${params.market_id}`;
+    const title = `${market.fighter_a} vs ${market.fighter_b} — Bet on BANKERCHANGER`;
+    const description = `Bet on ${market.fighter_a} vs ${market.fighter_b} — ${market.weight_class}${market.title_fight ? ' Title Fight' : ''} on BANKERCHANGER.`;
+    const imageUrl = `${base}/api/og?market=${params.market_id}`;
 
     return {
-      title: `${title} — BoxMeOut`,
+      title,
       description,
       canonical: url,
       openGraph: {
-        title: `${title} — BoxMeOut`,
+        title,
         description,
         type: 'website',
         url,
-        siteName: 'BoxMeOut',
+        siteName: 'BANKERCHANGER',
         images: [
           {
             url: imageUrl,
             width: 1200,
             height: 630,
-            alt: title,
+            alt: `${market.fighter_a} vs ${market.fighter_b}`,
           },
         ],
       },
       twitter: {
         card: 'summary_large_image',
-        title: `${title} — BoxMeOut`,
+        title,
         description,
         images: [imageUrl],
       },

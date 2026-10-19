@@ -45,7 +45,7 @@ Initialize the frontend project with all required tooling.
 Implement `frontend/src/components/layout/Header.tsx`.
 
 **What to render**
-- Left: BOXMEOUT text logo linked to `/`
+- Left: BANKERCHANGER text logo linked to `/`
 - Center: nav links — "Markets" → `/`, "Portfolio" → `/portfolio`
 - Right: `WalletButton` component
 - Network indicator badge: "TESTNET" (amber) or "MAINNET" (green) from `NEXT_PUBLIC_STELLAR_NETWORK` env
@@ -94,7 +94,7 @@ Implement `frontend/src/components/layout/WalletButton.tsx`.
 Implement `frontend/src/hooks/useWallet.ts`.
 
 **What to implement**
-- On mount: read address from `localStorage.getItem("boxmeout_wallet_address")`; if found, fetch balance
+- On mount: read address from `localStorage.getItem("bankerchanger_wallet_address")`; if found, fetch balance
 - `connect()`: call `wallet.connectWallet()`, store returned address in localStorage, fetch balance
 - `disconnect()`: clear localStorage key, reset state
 - Expose: `address`, `balance`, `isConnected`, `isConnecting`, `error`, `connect`, `disconnect`
@@ -117,7 +117,7 @@ Implement `connectWallet()` in `frontend/src/services/wallet.ts`.
 **What to implement**
 - Check if `window.freighter` is available; if not, check `window.albedo`
 - For Freighter: call `freighter.requestAccess()` then `freighter.getPublicKey()`
-- For Albedo: call `albedo.publicKey({ token: "boxmeout" })`
+- For Albedo: call `albedo.publicKey({ token: "bankerchanger" })`
 - If neither wallet found, throw `WalletNotInstalledError` with a message linking to Freighter install page
 
 **Acceptance Criteria**

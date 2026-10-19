@@ -19,8 +19,8 @@ The fastest way to get everything running:
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/your-org/boxmeout.git
-cd boxmeout
+git clone https://github.com/your-org/bankerchanger.git
+cd bankerchanger
 ```
 
 ### 2. Set Up Environment Files
@@ -137,7 +137,7 @@ Key variables you need to configure:
 
 ```env
 # Database
-DATABASE_URL=postgresql://boxmeout:boxmeout@localhost:5432/boxmeout
+DATABASE_URL=postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
 
 # Redis
 REDIS_URL=redis://localhost:6379
@@ -151,7 +151,7 @@ STELLAR_NETWORK=testnet
 FACTORY_CONTRACT_ADDRESS=<deployed-contract-address>
 
 # Secrets (CHANGE IN PRODUCTION!)
-JWT_SECRET=change-me-in-production
+JWT_SECRET=replace-this-with-a-random-secret-at-least-32-bytes
 ADMIN_JWT_SECRET=change-me-in-production
 ORACLE_PRIVATE_KEY=<your-stellar-secret-key>
 
@@ -169,7 +169,7 @@ SMTP_HOST=smtp.example.com
 SMTP_PORT=587
 SMTP_USER=you@example.com
 SMTP_PASS=your-password
-SMTP_FROM=no-reply@boxmeout.app
+SMTP_FROM=no-reply@bankerchanger.app
 ```
 
 ### Indexer (.env)
@@ -258,10 +258,10 @@ npm run migrate
 
 ```bash
 # Via Docker
-docker compose exec postgres psql -U boxmeout -d boxmeout
+docker compose exec postgres psql -U bankerchanger -d bankerchanger
 
 # Or locally
-psql -h localhost -U boxmeout -d boxmeout
+psql -h localhost -U bankerchanger -d bankerchanger
 ```
 
 ### Reset Database
@@ -297,7 +297,7 @@ docker compose ps postgres
 
 **Verify database credentials:**
 ```bash
-docker compose exec postgres psql -U boxmeout -d boxmeout -c '\l'
+docker compose exec postgres psql -U bankerchanger -d bankerchanger -c '\l'
 ```
 
 ### Port Already in Use
@@ -442,8 +442,8 @@ See [docs/DEPLOYMENT.md](./DEPLOYMENT.md) for production deployment guide.
 
 ## Support
 
-- **Issues**: https://github.com/your-org/boxmeout/issues
-- **Discussions**: https://github.com/your-org/boxmeout/discussions
+- **Issues**: https://github.com/your-org/bankerchanger/issues
+- **Discussions**: https://github.com/your-org/bankerchanger/discussions
 
 ## Summary
 

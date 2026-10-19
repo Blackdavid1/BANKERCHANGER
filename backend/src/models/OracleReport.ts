@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — OracleReport Database Model
+// BANKERCHANGER — OracleReport Database Model
 // ============================================================
 
 export interface OracleReport {

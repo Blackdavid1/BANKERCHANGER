@@ -3,7 +3,7 @@ import { Counter, Histogram, Gauge, register, collectDefaultMetrics } from 'prom
 // Collect default Node.js metrics (GC, event loop, memory, etc.)
 collectDefaultMetrics({ register });
 
-register.setDefaultLabels({ app: 'boxmeout' });
+register.setDefaultLabels({ app: 'bankerchanger' });
 
 // ── HTTP Request Metrics ──────────────────────────────────────────────────────
 
@@ -44,6 +44,7 @@ export const cacheHitsTotal = new Counter({
 export const cacheMissesTotal = new Counter({
   name: 'cache_misses_total',
   help: 'Total number of Redis cache misses',
+  labelNames: ['reason'] as const,
 });
 
 // ── WebSocket Metrics ─────────────────────────────────────────────────────────
@@ -74,6 +75,18 @@ export const cronNotificationsSoftDeleted = new Counter({
 export const cronDistributionsArchived = new Counter({
   name: 'cron_distributions_archived_total',
   help: 'Total failed distributions rows archived by cleanup cron',
+});
+
+export const cronBlockchainEventsDeleted = new Counter({
+  name: 'cron_blockchain_events_deleted_total',
+  help: 'Total processed blockchain_events rows deleted by cleanup cron',
+});
+
+// ── Indexer Gap Recovery Metrics (Issue #673) ─────────────────────────────────
+
+export const indexerGapBackfillTotal = new Counter({
+  name: 'indexer_gap_backfill_total',
+  help: 'Total missing ledgers backfilled during gap recovery',
 });
 
 export { register };

@@ -2,7 +2,7 @@
  * Integration tests for StellarIndexer handlers.
  *
  * Requires a running PostgreSQL instance pointed to by DATABASE_URL.
- * Default: postgresql://boxmeout:boxmeout@localhost:5433/boxmeout_test
+ * Default: postgresql://bankerchanger:bankerchanger@localhost:5433/bankerchanger_test
  * Start with: docker compose --profile test up -d postgres-test
  */
 
@@ -20,7 +20,7 @@ import {
 
 // Point the pool at the test DB
 process.env.DATABASE_URL =
-  process.env.DATABASE_URL ?? 'postgresql://boxmeout:boxmeout@localhost:5433/boxmeout_test';
+  process.env.DATABASE_URL ?? 'postgresql://bankerchanger:bankerchanger@localhost:5433/bankerchanger_test';
 
 // Re-import pool AFTER env is set
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -104,11 +104,16 @@ describe('handleBetPlaced', () => {
 
   it('inserts Bet and updates pool totals atomically', async () => {
     await handleBetPlaced(
-      event('BetPlaced', { market_id: MARKET_ID, bettor_address: BETTOR, side: 'fighter_a', amount: '50000000' }, 'tx-bet-1'),
+      event('BetPlaced', {
+        market_id: MARKET_ID,
+        bet: { bettor: BETTOR, side: 'fighter_a', amount: '50000000' },
+        odds_at_bet_time: { odds_a: 4000, odds_b: 3500, odds_draw: 2500 },
+      }, 'tx-bet-1'),
     );
     const [bet] = await q('SELECT * FROM bets WHERE tx_hash = $1', ['tx-bet-1']);
     expect(bet.bettor_address).toBe(BETTOR);
     expect(bet.side).toBe('fighter_a');
+    expect(bet.odds_snapshot).toEqual({ odds_a: 4000, odds_b: 3500, odds_draw: 2500 });
 
     const [market] = await q('SELECT pool_a, total_pool FROM markets WHERE market_id = $1', [MARKET_ID]);
     expect(Number(market.pool_a)).toBe(50_000_000);

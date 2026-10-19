@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the email verification feature implementation for BOXMEOUT. The feature ensures users verify their email address before they can place trades or withdraw funds.
+This document describes the email verification feature implementation for BANKERCHANGER. The feature ensures users verify their email address before they can place trades or withdraw funds.
 
 ## Architecture
 
@@ -261,7 +261,7 @@ VERIFY_EMAIL_URL=http://localhost:3000/auth/verify-email
 REDIS_URL=redis://localhost:6379
 
 # JWT configuration
-JWT_SECRET=your-secret-key
+JWT_SECRET=replace-this-with-a-random-secret-at-least-32-bytes
 JWT_EXPIRES_IN=15m
 REFRESH_EXPIRES_IN=7d
 

@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — Wallet Service
+// BANKERCHANGER — Wallet Service
 // Manages Freighter wallet connection and Stellar transactions.
 // ============================================================
 
@@ -14,6 +14,7 @@ import {
   xdr,
 } from '@stellar/stellar-sdk';
 import type { BetSide, CreateProposalParams, VoteType } from '../types';
+import { xlmToStroops } from '../utils/xlmToStroops';
 
 const NETWORK = process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? 'testnet';
 const HORIZON_URL =
@@ -26,7 +27,7 @@ const SOROBAN_RPC_URL =
 const NETWORK_PASSPHRASE =
   NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 
-const WALLET_STORAGE_KEY = 'boxmeout_wallet_address';
+const WALLET_STORAGE_KEY = 'bankerchanger_wallet_address';
 
 /**
  * Storage Decision: sessionStorage vs localStorage
@@ -68,6 +69,31 @@ export class WalletSignError extends Error {
   }
 }
 
+export const WALLET_TRANSACTION_CANCELLED_MESSAGE =
+  'Transaction cancelled — you declined the request in Freighter';
+
+export class WalletTransactionCancelledError extends Error {
+  constructor() {
+    super(WALLET_TRANSACTION_CANCELLED_MESSAGE);
+    this.name = 'WalletTransactionCancelledError';
+  }
+}
+
+function createWalletSignError(error: unknown): Error {
+  if (
+    error !== null &&
+    typeof error === 'object' &&
+    'name' in error &&
+    error.name === 'UserDeclinedAccess'
+  ) {
+    return new WalletTransactionCancelledError();
+  }
+
+  return new WalletSignError(
+    error instanceof Error ? error.message : 'User rejected transaction signing',
+  );
+}
+
 export class TxSubmissionError extends Error {
   constructor(message: string, public readonly details?: unknown) {
     super(message);
@@ -75,12 +101,19 @@ export class TxSubmissionError extends Error {
   }
 }
 
-// ─── Transaction helper ───────────────────────────────────────────────────────
+// ─── Transaction helper with state callbacks ───────────────────────────────
 
-async function buildAndSubmit(
+export type TxStageCallback = (stage: 'signing' | 'broadcasting' | 'confirming') => void;
+
+/**
+ * Like buildAndSubmit but calls onStage at each phase so the UI can show granular status.
+ * Phases: signing → broadcasting → confirming → returns hash
+ */
+async function buildAndSubmitWithStages(
   contractAddress: string,
   method: string,
   args: xdr.ScVal[],
+  onStage: TxStageCallback,
 ): Promise<string> {
   const address = getConnectedAddress();
   if (!address) throw new Error('WalletNotConnected');
@@ -103,7 +136,8 @@ async function buildAndSubmit(
   const freighter = (window as any).freighter;
   if (!freighter) throw new Error('WalletNotInstalledError');
 
-  // Sign with Freighter, capturing signing errors
+  // Phase 1: Signing
+  onStage('signing');
   let signedTxXdr: string;
   try {
     const result = await freighter.signTransaction(txXdr, {
@@ -111,13 +145,11 @@ async function buildAndSubmit(
     });
     signedTxXdr = result.signedTxXdr;
   } catch (error) {
-    // Freighter throws when user rejects signing
-    throw new WalletSignError(
-      error instanceof Error ? error.message : 'User rejected transaction signing',
-    );
+    throw createWalletSignError(error);
   }
 
-  // Submit signed transaction to Stellar network
+  // Phase 2: Broadcasting
+  onStage('broadcasting');
   const submitRes = await server.sendTransaction(
     TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE),
   );
@@ -129,7 +161,8 @@ async function buildAndSubmit(
     );
   }
 
-  // Poll for transaction confirmation (max 30 seconds = 20 polls * 1.5s)
+  // Phase 3: Confirming
+  onStage('confirming');
   let getRes = await server.getTransaction(submitRes.hash);
   for (let i = 0; i < 20 && getRes.status === 'NOT_FOUND'; i++) {
     await new Promise((r) => setTimeout(r, 1500));
@@ -146,12 +179,74 @@ async function buildAndSubmit(
   return submitRes.hash;
 }
 
+// ─── Transaction helper ───────────────────────────────────────────────────────
+
+async function buildAndSubmit(
+  contractAddress: string,
+  method: string,
+  args: xdr.ScVal[],
+): Promise<string> {
+  return buildAndSubmitWithStages(contractAddress, method, args, () => {
+    // No-op for backwards compatibility
+  });
+}
+
 // ─── Wallet connection ────────────────────────────────────────────────────────
+
+/** Returns which wallet extensions are installed in the current browser. */
+export function detectWallets(): { freighter: boolean; albedo: boolean } {
+  if (typeof window === 'undefined') return { freighter: false, albedo: false };
+  return {
+    freighter: !!(window as any).freighter,
+    albedo: !!(window as any).albedo,
+  };
+}
+
+export type WalletType = 'freighter' | 'albedo';
+
+/**
+ * Connect to a specific wallet extension by name.
+ * Used by the wallet selection modal so each button connects to the
+ * wallet the user explicitly chose (#360).
+ */
+export async function connectWalletByType(type: WalletType): Promise<string> {
+  if (typeof window === 'undefined') throw new Error('Browser only');
+
+  if (type === 'freighter') {
+    const freighter = (window as any).freighter;
+    if (!freighter) throw new WalletNotInstalledError('Freighter is not installed. Get it at https://freighter.app');
+    try {
+      await freighter.requestAccess();
+      const { publicKey } = await freighter.getPublicKey();
+      sessionStorage.setItem(WALLET_STORAGE_KEY, publicKey);
+      return publicKey;
+    } catch (err) {
+      throw new WalletConnectionError(err instanceof Error ? err.message : 'User rejected wallet connection');
+    }
+  }
+
+  if (type === 'albedo') {
+    const albedo = (window as any).albedo;
+    if (!albedo) throw new WalletNotInstalledError('Albedo is not installed. Get it at https://albedo.link');
+    try {
+      const { pubkey } = await albedo.publicKey({ token: 'boxmeout' });
+      sessionStorage.setItem(WALLET_STORAGE_KEY, pubkey);
+      return pubkey;
+    } catch (err) {
+      throw new WalletConnectionError(err instanceof Error ? err.message : 'User rejected wallet connection');
+    }
+  }
+
+  throw new WalletNotInstalledError();
+}
 
 export async function connectWallet(): Promise<string> {
   if (typeof window === 'undefined') throw new Error('Browser only');
+  
   const freighter = (window as any).freighter;
   const albedo = (window as any).albedo;
+  
+  // Try Freighter first if available
   if (freighter) {
     try {
       await freighter.requestAccess();
@@ -164,9 +259,11 @@ export async function connectWallet(): Promise<string> {
       );
     }
   }
+  
+  // Try Albedo if Freighter is not available or connection failed
   if (albedo) {
     try {
-      const { pubkey } = await albedo.publicKey({ token: 'boxmeout' });
+      const { pubkey } = await albedo.publicKey({ token: 'bankerchanger' });
       sessionStorage.setItem(WALLET_STORAGE_KEY, pubkey);
       return pubkey;
     } catch (err) {
@@ -175,8 +272,10 @@ export async function connectWallet(): Promise<string> {
       );
     }
   }
+  
+  // Neither wallet is installed - throw with helpful message
   throw new WalletNotInstalledError(
-    'No wallet extension found. Install Freighter at https://freighter.app',
+    'No wallet extension found. Install Freighter at https://freighter.app or Albedo at https://albedo.link',
   );
 }
 
@@ -202,6 +301,18 @@ export async function submitBet(
   ]);
 }
 
+export async function submitBetWithStages(
+  market_contract_address: string,
+  side: BetSide,
+  amount_xlm: number,
+  onStage: TxStageCallback,
+): Promise<string> {
+  return buildAndSubmitWithStages(market_contract_address, 'place_bet', [
+    nativeToScVal(side, { type: 'symbol' }),
+    nativeToScVal(xlmToStroops(amount_xlm), { type: 'i128' }),
+  ], onStage);
+}
+
 export async function submitClaim(market_contract_address: string): Promise<string> {
   const bettor = getConnectedAddress();
   if (!bettor) throw new Error('WalletNotConnected');
@@ -212,8 +323,6 @@ export async function submitClaim(market_contract_address: string): Promise<stri
     new Address(token).toScVal(),
   ]);
 }
-
-export type TxStageCallback = (stage: 'signing' | 'broadcasting' | 'confirming') => void;
 
 /**
  * Like submitClaim but calls onStage at each phase so the UI can show granular status.
@@ -257,7 +366,7 @@ export async function submitClaimWithStages(
     const result = await freighter.signTransaction(txXdr, { networkPassphrase: NETWORK_PASSPHRASE });
     signedTxXdr = result.signedTxXdr;
   } catch (error) {
-    throw new WalletSignError(error instanceof Error ? error.message : 'User rejected transaction signing');
+    throw createWalletSignError(error);
   }
 
   onStage('broadcasting');
@@ -416,15 +525,7 @@ export async function getWalletBalance(): Promise<number> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-export function xlmToStroops(xlm: number): bigint {
-  const [whole, frac = ''] = xlm.toString().split('.');
-  const fracPadded = frac.slice(0, 7).padEnd(7, '0');
-  return BigInt(whole) * 10_000_000n + BigInt(fracPadded);
-}
-
-export function stroopsToXlm(stroops: bigint | string): number {
-  return Number(BigInt(stroops)) / 10_000_000;
-}
+export { xlmToStroops, stroopsToXlm } from '../utils/xlmToStroops';
 
 export function stellarExplorerUrl(
   type: 'tx' | 'account' | 'contract',

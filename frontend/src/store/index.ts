@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — Global Zustand Store
+// BANKERCHANGER — Global Zustand Store
 // Holds app-wide state: wallet, network, notifications.
 // Contributors: implement the store slices.
 // ============================================================
@@ -67,6 +67,6 @@ export const useAppStore = create<AppState>()(
       setNetwork: (network) => set({ network }),
       setTxStatus: (status) => set({ lastTxStatus: status }),
     }),
-    { name: 'BoxmeoutAppStore' },
+    { name: 'BankERCHANGERAppStore' },
   ),
 );

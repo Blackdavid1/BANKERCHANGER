@@ -1,5 +1,5 @@
 // ============================================================
-// BOXMEOUT — Centralized Cache Service
+// BANKERCHANGER — Centralized Cache Service
 // Provides Redis cache operations with automatic invalidation.
 // Namespaced keys: market:{id}, leaderboard:global:*, user:{id}:balance
 // ============================================================
@@ -8,6 +8,8 @@ import { redis } from '../config/redis';
 import { logger } from '../utils/logger';
 
 export { redis };
+
+import { cacheMissesTotal } from './metrics.service';
 
 /**
  * Get a value from cache by key.
@@ -19,6 +21,7 @@ export async function get<T>(key: string): Promise<T | null> {
     return data ? (JSON.parse(data) as T) : null;
   } catch (err) {
     logger.warn({ err, key }, 'cache.get: Redis unavailable, bypassing cache');
+    cacheMissesTotal.inc({ reason: 'redis_unavailable' });
     return null;
   }
 }
@@ -95,6 +98,7 @@ export async function getOrSet<T>(
     return value;
   } catch (err) {
     logger.warn({ err, key }, 'cache.getOrSet: Error, computing without cache');
+    cacheMissesTotal.inc({ reason: 'redis_unavailable' });
     // If cache operations fail, just compute and return
     return compute();
   }
