@@ -64,19 +64,10 @@ const TOKEN: &str = "TOKEN";
 pub const EXPIRY_GRACE_PERIOD: u64 = 86_400;
 
 // ─── Storage TTL Constants ────────────────────────────────────────────────────
-/// Maximum TTL for market data expressed in ledgers.
-/// At ~5 seconds per ledger: 30 days × 24 h × 60 min × 12 ledgers/min = 518_400 ledgers.
-/// Using ledger counts (not seconds) as required by Soroban's extend_ttl API.
-const MAX_TTL: u32 = 518_400;
-
-/// State rent extension window for winning share holders after market resolution (~3 months).
-pub const CLAIM_WINDOW_LEDGERS: u32 = 2_000_000;
-
-/// Fallback maximum price impact (slippage) when no tier is set, in basis points.
-/// Used in `emit_slippage_checked` for legacy / no-tier markets.
-/// 3000 bps = 30 % — protects bettors from placing inadvertently large
-/// orders into thin pools that would give them very poor execution.
-const MAX_SLIPPAGE_BPS: i128 = 3_000;
+/// Maximum TTL for market data (30 days in ledger entries)
+const MAX_TTL: u32 = 2_592_000;
+/// Maximum age for unresolved oracle reports before stale entries are pruned.
+const REPORT_TTL: u64 = 172_800;
 
 // ─── Cross-contract client for oracle whitelist check ─────────────────────────
 #[contractclient(name = "FactoryClient")]
@@ -188,7 +179,7 @@ impl Market {
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         let client = FactoryClient::new(env, &factory);
-        Ok(client.get_oracle_key(caller))
+        Ok(client.get_oracle_key(&caller.clone()))
     }
 
     /// Extend TTL on market data entries to prevent premature expiration.
@@ -1079,100 +1070,39 @@ impl Market {
         Ok(())
     }
 
-    /// Clears oracle reports from PENDING_REPORTS that are older than REPORT_TTL.
-    /// Callable by factory / admin. Returns the number of evicted reports.
-    pub fn clear_stale_reports(env: Env, caller: Address) -> Result<u32, ContractError> {
-        caller.require_auth();
+    /// Removes stale pending oracle reports older than REPORT_TTL.
+    ///
+    /// Intended for admin cleanup when a previous resolution round stalls and
+    /// newer reports need to be accepted again.
+    pub fn clear_stale_reports(env: Env, admin: Address) -> Result<u32, ContractError> {
+        admin.require_auth();
         let factory: Address = env
-            .storage()
-            .persistent()
+            .storage().persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
-        if caller != factory {
-            return Err(ContractError::Unauthorized);
+        if admin != factory {
+            return Err(ContractError::NotAdmin);
         }
 
-        let pending: Map<Address, OracleReport> = env
-            .storage()
+        let mut pending: Map<Address, OracleReport> = env.storage()
             .persistent()
             .get(&PENDING_REPORTS)
             .unwrap_or_else(|| Map::new(&env));
-        let now = env.ledger().timestamp();
-        let mut updated: Map<Address, OracleReport> = Map::new(&env);
-        let mut cleared = 0u32;
 
-        for (addr, rep) in pending.iter() {
-            if now.saturating_sub(rep.reported_at) >= REPORT_TTL {
-                cleared += 1;
+        let now = env.ledger().timestamp();
+        let mut retained: Map<Address, OracleReport> = Map::new(&env);
+        let mut cleared_count = 0u32;
+
+        for (oracle, report) in pending.iter() {
+            if now.saturating_sub(report.submitted_at) >= REPORT_TTL {
+                cleared_count += 1;
             } else {
-                updated.set(addr, rep);
+                retained.set(oracle, report);
             }
         }
 
-        env.storage().persistent().set(&PENDING_REPORTS, &updated);
-        Ok(cleared)
-    }
-
-    // =========================================================================
-    // FINALIZE RESOLUTION — callable by anyone after cooldown window
-    // =========================================================================
-    /// Finalizes a market that is in `ResolutionPending` state once the dispute
-    /// cooldown window has elapsed.
-    ///
-    /// This function is permissionless — any address can call it once the
-    /// `cooldown_end_ledger` has been passed, which avoids relying on a
-    /// privileged keeper bot.
-    ///
-    /// If the cooldown window is still active this function returns
-    /// `DisputeCooldownActive`. If the market has been moved to `Disputed`
-    /// (admin froze the resolution) this returns `ResolutionNotPending`.
-    ///
-    /// # Errors
-    /// - `ResolutionNotPending`: Market is not in ResolutionPending state
-    /// - `DisputeCooldownActive`: Cooldown window has not yet elapsed
-    pub fn finalize_resolution(env: Env) -> Result<(), ContractError> {
-        Self::require_not_paused(&env)?;
-
-        let mut state = Self::load_state(&env)?;
-
-        // Only valid to call when the market is waiting for the cooldown to expire.
-        if state.status != MarketStatus::ResolutionPending {
-            return Err(ContractError::ResolutionNotPending);
-        }
-
-        // Check that the cooldown window has elapsed.
-        let cooldown_end_ledger: u32 = env
-            .storage()
-            .persistent()
-            .get(&COOLDOWN_END_LEDGER)
-            .unwrap_or(0);
-
-        if env.ledger().sequence() < cooldown_end_ledger {
-            return Err(ContractError::DisputeCooldownActive);
-        }
-
-        // ── EFFECTS ──────────────────────────────────────────────────────────
-        state.status = MarketStatus::Resolved;
-        state.resolved_at = env.ledger().timestamp();
-        Self::save_state(&env, &state);
-        Self::extend_market_ttl(&env);
-        Self::extend_resolution_ttl(&env);
-
-        // Clean up the cooldown ledger entry — no longer needed.
-        env.storage().persistent().remove(&COOLDOWN_END_LEDGER);
-
-        let outcome_byte: u32 = match &state.outcome {
-            OptionalOutcome::Some(o) => match o {
-                boxmeout_shared::types::Outcome::FighterA => 0,
-                boxmeout_shared::types::Outcome::FighterB => 1,
-                boxmeout_shared::types::Outcome::Draw => 2,
-                boxmeout_shared::types::Outcome::NoContest => 3,
-            },
-            OptionalOutcome::None => return Err(ContractError::InvalidOutcome),
-        };
-
-        boxmeout_shared::emit_resolution_finalized(&env, state.market_id, outcome_byte);
-        Ok(())
+        env.storage().persistent().set(&PENDING_REPORTS, &retained);
+        Ok(cleared_count)
     }
 
     // =========================================================================

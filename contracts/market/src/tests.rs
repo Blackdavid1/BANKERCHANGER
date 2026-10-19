@@ -98,8 +98,11 @@ mod security_tests {
         // into claim_winnings while a token transfer is in flight.
         use boxmeout_shared::errors::ContractError;
         let env = Env::default();
-        env.storage().instance().set(&"CLAIMING", &true);
-        let claiming: bool = env.storage().instance().get(&"CLAIMING").unwrap_or(false);
+        let contract_id = env.register_contract(None, crate::Market);
+        let claiming = env.as_contract(&contract_id, || {
+            env.storage().instance().set(&"CLAIMING", &true);
+            env.storage().instance().get(&"CLAIMING").unwrap_or(false)
+        });
         let result: Result<(), ContractError> = if claiming {
             Err(ContractError::ReentrancyGuard)
         } else {
@@ -113,8 +116,11 @@ mod security_tests {
     fn test_reentrancy_guard_allows_after_reset() {
         use boxmeout_shared::errors::ContractError;
         let env = Env::default();
-        env.storage().instance().set(&"CLAIMING", &false);
-        let claiming: bool = env.storage().instance().get(&"CLAIMING").unwrap_or(false);
+        let contract_id = env.register_contract(None, crate::Market);
+        let claiming = env.as_contract(&contract_id, || {
+            env.storage().instance().set(&"CLAIMING", &false);
+            env.storage().instance().get(&"CLAIMING").unwrap_or(false)
+        });
         let result: Result<(), ContractError> = if claiming {
             Err(ContractError::ReentrancyGuard)
         } else {
@@ -448,7 +454,7 @@ mod place_bet_edge_cases {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -833,7 +839,7 @@ mod full_market_lifecycle {
         // Set initial ledger time
         env.ledger().set(LedgerInfo {
             timestamp: 1000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -885,7 +891,7 @@ mod full_market_lifecycle {
         // Simulate market lock
         env.ledger().set(LedgerInfo {
             timestamp: lock_threshold + 1,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 101,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1003,7 +1009,7 @@ mod resolve_dispute_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1084,12 +1090,18 @@ mod resolve_dispute_tests {
         client.resolve_dispute(&factory, &Outcome::FighterA);
 
         let events = env.events().all();
-        let last = events.last().unwrap();
+        let last = events.events().last().unwrap();
+        let body = match &last.body {
+            soroban_sdk::xdr::ContractEventBody::V0(body) => body,
+            _ => panic!("unsupported event body variant"),
+        };
+        let topic_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.topics.get(0).unwrap().clone()).unwrap();
         let topic_sym: Symbol =
-            soroban_sdk::TryFromVal::try_from_val(&env, &last.1.get(0).unwrap()).unwrap();
-        assert_eq!(topic_sym, Symbol::new(&env, "market_resolved"));
+            soroban_sdk::TryFromVal::try_from_val(&env, &topic_val).unwrap();
+        assert_eq!(topic_sym, Symbol::new(&env, "dispute_resolved"));
+        let market_id_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.topics.get(1).unwrap().clone()).unwrap();
         let market_id: u64 =
-            soroban_sdk::TryFromVal::try_from_val(&env, &last.1.get(1).unwrap()).unwrap();
+            soroban_sdk::TryFromVal::try_from_val(&env, &market_id_val).unwrap();
         assert_eq!(market_id, 1u64);
     }
 
@@ -1100,7 +1112,7 @@ mod resolve_dispute_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1197,7 +1209,7 @@ mod get_current_odds_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1343,7 +1355,7 @@ mod estimate_payout_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1524,7 +1536,7 @@ mod oracle_sig_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 50_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1660,7 +1672,7 @@ mod oracle_sig_tests {
         // Advance time past resolution_window (scheduled_at=100_000 + window=86400 = 186_400)
         env.ledger().set(LedgerInfo {
             timestamp: 200_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 200,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1832,7 +1844,7 @@ mod claim_routing_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 50_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -2206,7 +2218,7 @@ mod bet_timing_lock_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -2415,7 +2427,7 @@ mod min_bet_enforcement_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -2562,7 +2574,7 @@ mod place_bet_boundary_fuzz_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -2698,7 +2710,7 @@ mod get_all_bets_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -2898,7 +2910,7 @@ mod market_lifecycle_tests {
     fn set_time(env: &Env, ts: u64) {
         env.ledger().set(LedgerInfo {
             timestamp: ts,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -3323,7 +3335,7 @@ mod stale_oracle_reports_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -3392,11 +3404,7 @@ mod stale_oracle_reports_tests {
         let (client, contract_id, factory) = setup(&env, now);
         let oracle = Address::generate(&env);
 
-        inject_pending(
-            &env,
-            &contract_id,
-            &[(oracle.clone(), make_report(&env, &oracle, submitted_at))],
-        );
+        inject_pending(&env, &contract_id, &[(oracle.clone(), make_report(&env, &oracle, submitted_at))]);
 
         let cleared = client.clear_stale_reports(&factory);
         assert_eq!(cleared, 1, "Report aged exactly REPORT_TTL must be cleared");
