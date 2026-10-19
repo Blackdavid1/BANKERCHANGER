@@ -552,7 +552,7 @@ impl MarketFactory {
             let market_address = market_map.get(market_id)
                 .ok_or(ContractError::MarketNotFound)?;
             let market_client = MarketClient::new(&env, &market_address);
-            market_client.upgrade(&admin, &new_wasm_hash)?;
+            market_client.upgrade(&admin, &new_wasm_hash);
         }
 
         Ok(())
@@ -804,7 +804,8 @@ mod admin_transfer_tests {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
-        client.initialize(&admin, &treasury, &oracle, &FactoryConfig {
+        let oracle_raw_key = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        client.initialize(&admin, &treasury, &oracle, &oracle_raw_key, &FactoryConfig {
             default_min_bet: 1_000_000,
             default_max_bet: 100_000_000_000,
             default_fee_bps: 200,

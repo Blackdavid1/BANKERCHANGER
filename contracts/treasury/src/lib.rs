@@ -394,7 +394,9 @@ mod tests {
         let client = TreasuryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let market = Address::generate(&env);
-        client.initialize(&admin, &1_000_000_i128);
+        let bet_token = Address::generate(&env);
+        let factory = Address::generate(&env);
+        client.initialize(&admin, &bet_token, &factory, &1_000_000_i128);
         (env, client, admin, market)
     }
 
@@ -456,7 +458,9 @@ mod tests {
         let client = TreasuryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let market = Address::generate(&env);
-        client.initialize(&admin, &1_000_000_i128);
+        let bet_token = Address::generate(&env);
+        let factory = Address::generate(&env);
+        client.initialize(&admin, &bet_token, &factory, &1_000_000_i128);
 
         // Create a real token, mint to market so the transfer in deposit_fees succeeds.
         let token = setup_token(&env, &admin, &market, amount);
@@ -497,14 +501,18 @@ mod tests {
         client.emergency_drain(&admin, &token);
 
         let events = env.events().all();
-        let last = events.last().unwrap();
-        // topics is Vec<Val>; first topic is the symbol
+        let last = events.events().last().unwrap();
+        let body = match &last.body {
+            soroban_sdk::xdr::ContractEventBody::V0(body) => body,
+            _ => panic!("unsupported event body variant"),
+        };
+        let topic_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.topics.get(0).unwrap().clone()).unwrap();
         let topic_sym: soroban_sdk::Symbol =
-            soroban_sdk::TryFromVal::try_from_val(&env, &last.1.get(0).unwrap()).unwrap();
+            soroban_sdk::TryFromVal::try_from_val(&env, &topic_val).unwrap();
         assert_eq!(topic_sym, Symbol::new(&env, "emergency_drain"));
-        // data is (token, amount, admin)
+        let data_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.data).unwrap();
         let (ev_token, ev_amount, ev_admin): (Address, i128, Address) =
-            soroban_sdk::TryFromVal::try_from_val(&env, &last.2).unwrap();
+            soroban_sdk::TryFromVal::try_from_val(&env, &data_val).unwrap();
         assert_eq!(ev_token, token);
         assert_eq!(ev_amount, 250_000_i128);
         assert_eq!(ev_admin, admin);
@@ -539,7 +547,9 @@ mod deposit_fees_tests {
         let client = TreasuryClient::new(&env, &id);
         let admin = Address::generate(&env);
         let market = Address::generate(&env);
-        client.initialize(&admin, &1_000_000_i128);
+        let bet_token = Address::generate(&env);
+        let factory = Address::generate(&env);
+        client.initialize(&admin, &bet_token, &factory, &1_000_000_i128);
         let token = env.register_stellar_asset_contract(admin.clone());
         StellarAssetClient::new(&env, &token).mint(&market, &10_000_000_i128);
         (env, client, admin, market, token)
@@ -571,12 +581,18 @@ mod deposit_fees_tests {
         client.deposit_fees(&market, &token, &500_000_i128);
 
         let events = env.events().all();
-        let last = events.last().unwrap();
+        let last = events.events().last().unwrap();
+        let body = match &last.body {
+            soroban_sdk::xdr::ContractEventBody::V0(body) => body,
+            _ => panic!("unsupported event body variant"),
+        };
+        let topic_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.topics.get(0).unwrap().clone()).unwrap();
         let topic_sym: Symbol =
-            soroban_sdk::TryFromVal::try_from_val(&env, &last.1.get(0).unwrap()).unwrap();
+            soroban_sdk::TryFromVal::try_from_val(&env, &topic_val).unwrap();
         assert_eq!(topic_sym, Symbol::new(&env, "fee_deposited"));
+        let data_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.data).unwrap();
         let (ev_market, ev_token, ev_amount): (Address, Address, i128) =
-            soroban_sdk::TryFromVal::try_from_val(&env, &last.2).unwrap();
+            soroban_sdk::TryFromVal::try_from_val(&env, &data_val).unwrap();
         assert_eq!(ev_market, market);
         assert_eq!(ev_token, token);
         assert_eq!(ev_amount, 500_000_i128);
@@ -594,7 +610,8 @@ mod initialize_tests {
     fn setup_client(env: &Env) -> TreasuryClient<'static> {
         env.mock_all_auths();
         let id = env.register_contract(None, Treasury);
-        TreasuryClient::new(env, &id)
+        let client = TreasuryClient::new(env, &id);
+        client
     }
 
     /// First call stores admin and withdrawal_limit correctly.
@@ -603,8 +620,10 @@ mod initialize_tests {
         let env = Env::default();
         let client = setup_client(&env);
         let admin = Address::generate(&env);
+        let bet_token = Address::generate(&env);
+        let factory = Address::generate(&env);
 
-        client.initialize(&admin, &5_000_000i128);
+        client.initialize(&admin, &bet_token, &factory, &5_000_000i128);
 
         // Withdrawal limit is readable via get_daily_withdrawal_amount (starts at 0)
         assert_eq!(client.get_daily_withdrawal_amount(), 0);
@@ -619,9 +638,11 @@ mod initialize_tests {
         let env = Env::default();
         let client = setup_client(&env);
         let admin = Address::generate(&env);
+        let bet_token = Address::generate(&env);
+        let factory = Address::generate(&env);
 
-        client.initialize(&admin, &1_000_000i128);
-        let result = client.try_initialize(&admin, &1_000_000i128);
+        client.initialize(&admin, &bet_token, &factory, &1_000_000i128);
+        let result = client.try_initialize(&admin, &bet_token, &factory, &1_000_000i128);
         assert!(result.is_err());
     }
 
@@ -632,8 +653,10 @@ mod initialize_tests {
         let client = setup_client(&env);
         let admin = Address::generate(&env);
         let limit = 1_000_000i128;
+        let bet_token = Address::generate(&env);
+        let factory = Address::generate(&env);
 
-        client.initialize(&admin, &limit);
+        client.initialize(&admin, &bet_token, &factory, &limit);
 
         // A withdrawal above the limit must fail
         let token = Address::generate(&env);
@@ -648,7 +671,9 @@ mod initialize_tests {
         let env = Env::default();
         let client = setup_client(&env);
         let admin = Address::generate(&env);
-        client.initialize(&admin, &1_000_000i128);
+        let bet_token = Address::generate(&env);
+        let factory = Address::generate(&env);
+        client.initialize(&admin, &bet_token, &factory, &1_000_000i128);
 
         let token1 = Address::generate(&env);
         let token2 = Address::generate(&env);
@@ -662,7 +687,9 @@ mod initialize_tests {
         let env = Env::default();
         let client = setup_client(&env);
         let admin = Address::generate(&env);
-        client.initialize(&admin, &1_000_000i128);
+        let bet_token = Address::generate(&env);
+        let factory = Address::generate(&env);
+        client.initialize(&admin, &bet_token, &factory, &1_000_000i128);
 
         assert_eq!(client.get_daily_withdrawal_amount(), 0);
     }
@@ -686,7 +713,9 @@ mod treasury_lifecycle_tests {
         let client = TreasuryClient::new(env, &id);
         let admin = Address::generate(env);
         let market = Address::generate(env);
-        client.initialize(&admin, &limit);
+        let bet_token = Address::generate(env);
+        let factory = Address::generate(env);
+        client.initialize(&admin, &bet_token, &factory, &limit);
         let token = env.register_stellar_asset_contract(admin.clone());
         (client, admin, market, token)
     }

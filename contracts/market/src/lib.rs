@@ -38,6 +38,8 @@ const PENDING_REPORTS: &str = "PENDING_REPORTS";
 // ─── Storage TTL Constants ────────────────────────────────────────────────────
 /// Maximum TTL for market data (30 days in ledger entries)
 const MAX_TTL: u32 = 2_592_000;
+/// Maximum age for unresolved oracle reports before stale entries are pruned.
+const REPORT_TTL: u64 = 172_800;
 
 // ─── Cross-contract client for oracle whitelist check ─────────────────────────
 #[contractclient(name = "FactoryClient")]
@@ -115,7 +117,7 @@ impl Market {
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         let client = FactoryClient::new(env, &factory);
-        Ok(client.get_oracle_key(caller.clone()))
+        Ok(client.get_oracle_key(&caller.clone()))
     }
 
     /// Extend TTL on market data entries to prevent premature expiration.
@@ -431,6 +433,41 @@ impl Market {
         }
 
         Ok(())
+    }
+
+    /// Removes stale pending oracle reports older than REPORT_TTL.
+    ///
+    /// Intended for admin cleanup when a previous resolution round stalls and
+    /// newer reports need to be accepted again.
+    pub fn clear_stale_reports(env: Env, admin: Address) -> Result<u32, ContractError> {
+        admin.require_auth();
+        let factory: Address = env
+            .storage().persistent()
+            .get(&FACTORY)
+            .ok_or(ContractError::NotFactory)?;
+        if admin != factory {
+            return Err(ContractError::NotAdmin);
+        }
+
+        let mut pending: Map<Address, OracleReport> = env.storage()
+            .persistent()
+            .get(&PENDING_REPORTS)
+            .unwrap_or_else(|| Map::new(&env));
+
+        let now = env.ledger().timestamp();
+        let mut retained: Map<Address, OracleReport> = Map::new(&env);
+        let mut cleared_count = 0u32;
+
+        for (oracle, report) in pending.iter() {
+            if now.saturating_sub(report.submitted_at) >= REPORT_TTL {
+                cleared_count += 1;
+            } else {
+                retained.set(oracle, report);
+            }
+        }
+
+        env.storage().persistent().set(&PENDING_REPORTS, &retained);
+        Ok(cleared_count)
     }
 
     // =========================================================================

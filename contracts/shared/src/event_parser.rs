@@ -251,7 +251,19 @@ mod tests {
     macro_rules! last_event {
         ($env:expr) => {{
             let all = $env.events().all();
-            all.last().unwrap()
+            let event = all.events().last().unwrap();
+
+            match &event.body {
+                soroban_sdk::xdr::ContractEventBody::V0(body) => {
+                    let mut topics = soroban_sdk::Vec::new(&$env);
+                    for topic in body.topics.iter() {
+                        topics.push_back(soroban_sdk::Val::try_from_val(&$env, &topic).unwrap());
+                    }
+                    let data = soroban_sdk::Val::try_from_val(&$env, &body.data).unwrap();
+                    (Address::generate(&$env), topics, data)
+                }
+                _ => panic!("unsupported contract event body variant"),
+            }
         }};
     }
 
@@ -377,7 +389,7 @@ mod tests {
     fn test_parse_invalid_topics_returns_error() {
         let (env, _id) = setup();
         let empty: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(&env);
-        let dummy_data: soroban_sdk::Val = soroban_sdk::Val::from_void();
+        let dummy_data: soroban_sdk::Val = soroban_sdk::Val::from_void().into();
         let result = parse_market_locked_event(&env, &empty, &dummy_data);
         assert_eq!(result.unwrap_err(), ParseError::InvalidLength);
     }
