@@ -1,16 +1,55 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import { createHash } from 'crypto';
 import { z } from 'zod';
-import jwt from 'jsonwebtoken';
 import * as authService from '../services/auth.service';
 import { AppError } from '../utils/AppError';
 import { validateBody } from '../api/middleware/validate';
 import { rateLimit } from '../middleware/rate-limit.middleware';
-import { getEnv } from '../config/env';
+import { requireAuth } from '../middleware/auth.middleware';
 
 const router = Router();
+const LOGIN_FAILURE_THRESHOLD = 5;
+const LOGIN_FAILURE_TTL_SECONDS = 24 * 60 * 60;
+const LOGIN_BACKOFF_BASE_SECONDS = 30;
+const LOGIN_BACKOFF_MAX_SECONDS = 60 * 60;
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  max: 10,
+  keyBy: 'ip',
+  keyPrefix: 'auth:login:15m',
+});
 
-const env = getEnv();
-const JWT_SECRET = env.JWT_SECRET;
+function getLoginRedisKeys(email: string): { failures: string; backoff: string } {
+  const emailHash = createHash('sha256').update(email).digest('hex');
+  return {
+    failures: `auth:login:failures:${emailHash}`,
+    backoff: `auth:login:backoff:${emailHash}`,
+  };
+}
+
+async function getLoginBackoffSeconds(email: string): Promise<number> {
+  const { backoff } = getLoginRedisKeys(email);
+  const ttl = await redis.ttl(backoff);
+  return ttl > 0 ? ttl : 0;
+}
+
+async function recordLoginFailure(email: string): Promise<void> {
+  const { failures, backoff } = getLoginRedisKeys(email);
+  const failureCount = await incrWithExpire(redis, failures, LOGIN_FAILURE_TTL_SECONDS);
+  if (failureCount >= LOGIN_FAILURE_THRESHOLD) {
+    const exponent = Math.min(failureCount - LOGIN_FAILURE_THRESHOLD, 7);
+    const backoffSeconds = Math.min(
+      LOGIN_BACKOFF_BASE_SECONDS * 2 ** exponent,
+      LOGIN_BACKOFF_MAX_SECONDS,
+    );
+    await redis.set(backoff, '1', 'EX', backoffSeconds);
+  }
+}
+
+async function clearLoginFailures(email: string): Promise<void> {
+  const { failures, backoff } = getLoginRedisKeys(email);
+  await redis.del(failures, backoff);
+}
 
 /**
  * @swagger
@@ -18,38 +57,6 @@ const JWT_SECRET = env.JWT_SECRET;
  *   name: Auth
  *   description: Authentication and 2FA
  */
-
-// ---------------------------------------------------------------------------
-// Auth middleware — verifies JWT and checks session-revocation tombstone
-// ---------------------------------------------------------------------------
-async function requireAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      throw new AppError(401, 'Missing or invalid Authorization header');
-    }
-
-    const token = authHeader.slice(7);
-    const payload = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
-
-    if (payload.type !== 'access') {
-      throw new AppError(401, 'Invalid token type');
-    }
-
-    const userId = payload.sub as string;
-    const sessionVersion: number = payload.sv ?? 0;
-
-    // Check Redis tombstone — set on password reset
-    const revoked = await authService.isSessionRevoked(userId, sessionVersion);
-    if (revoked) throw new AppError(401, 'Session has been invalidated');
-
-    (req as unknown as Record<string, unknown>).userId = userId;
-    (req as unknown as Record<string, unknown>).sessionVersion = sessionVersion;
-    next();
-  } catch (err) {
-    next(err instanceof AppError ? err : new AppError(401, 'Invalid or expired token'));
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Zod schemas for request validation
@@ -61,6 +68,12 @@ const otpSchema = z.object({
 const verifySchema = z.object({
   tempToken: z.string().min(1),
   otp: z.string().min(1),
+});
+
+router.post('/activity-feed-token', (_req: Request, res: Response) => {
+  res
+    .set('Cache-Control', 'no-store')
+    .json({ accessToken: authService.createActivityFeedToken() });
 });
 
 // ---------------------------------------------------------------------------
@@ -102,12 +115,94 @@ const verifySchema = z.object({
  *       401:
  *         description: Invalid credentials
  */
-router.post('/login', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/login', loginLimiter, async (req: Request, res: Response, next: NextFunction) => {
+  const normalizedEmail =
+    typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   try {
-    const { email, password } = req.body;
-    if (!email || !password) throw new AppError(400, 'Email and password required');
-    const result = await authService.login(email, password);
+    const password = req.body?.password;
+    if (!normalizedEmail || !password) throw new AppError(400, 'Email and password required');
+    const retryAfterSeconds = await getLoginBackoffSeconds(normalizedEmail);
+    if (retryAfterSeconds > 0) {
+      res.set('Retry-After', String(retryAfterSeconds));
+      throw new AppError(429, 'Too many login attempts. Try again later.');
+    }
+
+    const result = await authService.login(normalizedEmail, password);
+    await clearLoginFailures(normalizedEmail);
     res.json(result);
+  } catch (err) {
+    if (normalizedEmail && err instanceof AppError && err.statusCode === 401) {
+      try {
+        await recordLoginFailure(normalizedEmail);
+      } catch (redisError) {
+        return next(redisError);
+      }
+    }
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /auth/refresh
+// ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /auth/refresh:
+ *   post:
+ *     summary: Exchange a refresh token for a new access token
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [refreshToken]
+ *             properties:
+ *               refreshToken:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: New access token
+ *       401:
+ *         description: Invalid, expired, or revoked refresh token
+ */
+router.post('/refresh', validateBody(refreshBody), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await authService.refreshAccessToken(req.body.refreshToken);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /auth/logout
+// ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /auth/logout:
+ *   post:
+ *     summary: Revoke a refresh token server-side
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [refreshToken]
+ *             properties:
+ *               refreshToken:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Refresh token revoked
+ */
+router.post('/logout', validateBody(logoutBody), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await authService.logout(req.body.refreshToken);
+    res.json({ success: true });
   } catch (err) {
     next(err);
   }

@@ -25,15 +25,35 @@ describe('totp.service', () => {
   });
 
   describe('verifyToken', () => {
-    it('accepts a valid current OTP', () => {
-      const totp = new OTPAuth.TOTP({
+    let totp: OTPAuth.TOTP;
+    let validOtp: string;
+
+    beforeEach(() => {
+      totp = new OTPAuth.TOTP({
         algorithm: 'SHA1',
         digits: 6,
         period: 30,
         secret: OTPAuth.Secret.fromBase32(secret),
       });
-      const validOtp = totp.generate();
+      validOtp = totp.generate();
+    });
+
+    it('accepts a valid current OTP', () => {
       expect(verifyToken(secret, validOtp)).toBe(true);
+    });
+
+    it('rejects an OTP from an adjacent window when window=0', () => {
+      const adj = totp.generate({
+        timestamp: Date.now() - 60_000, // 2 steps ago
+      });
+      expect(verifyToken(secret, adj)).toBe(false);
+    });
+
+    it('accepts an OTP from an adjacent window when a wider window is passed', () => {
+      const adj = totp.generate({
+        timestamp: Date.now() - 60_000, // 2 steps ago
+      });
+      expect(verifyToken(secret, adj, 2)).toBe(true);
     });
 
     it('rejects a wrong OTP', () => {
@@ -46,6 +66,16 @@ describe('totp.service', () => {
 
     it('rejects an empty string', () => {
       expect(verifyToken(secret, '')).toBe(false);
+    });
+
+    it('respects the TOTP_WINDOW environment variable', () => {
+      process.env.TOTP_WINDOW = '2';
+      const adj = totp.generate({
+        timestamp: Date.now() - 60_000,
+      });
+      // When window=2, a token 2 steps ago is within the accepted range
+      expect(verifyToken(secret, adj)).toBe(true);
+      delete process.env.TOTP_WINDOW;
     });
   });
 });

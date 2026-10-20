@@ -20,6 +20,9 @@ export function errorMiddleware(
         ...(!isProd && { stack: err.stack }),
       });
     }
+    
+    // Never include stack trace in response body for any environment
+    // Stack traces are only logged server-side
     res.status(err.statusCode).json({
       error: {
         statusCode: err.statusCode,
@@ -37,6 +40,8 @@ export function errorMiddleware(
     ...(!isProd && { stack: err instanceof Error ? err.stack : undefined }),
   });
 
+  // In production, return generic error message
+  // In development, include the actual error message but never the stack trace in response body
   res.status(500).json({
     error: {
       statusCode: 500,

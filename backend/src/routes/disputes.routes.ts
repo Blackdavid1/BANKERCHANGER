@@ -1,6 +1,6 @@
 // Disputes routes
 import { Router, Request, Response, NextFunction } from 'express';
-import { disputesController } from '../controllers/disputes.controller.js';
+import { disputesController } from '../api/controllers/disputes.controller.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { requireAdmin } from '../middleware/admin.middleware.js';
 import { validate } from '../middleware/validation.middleware.js';

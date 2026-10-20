@@ -43,7 +43,8 @@ export function requireAdminJwt(req: Request, _res: Response, next: NextFunction
 }
 
 /**
- * Verifies an admin user's access JWT (signed with JWT_SECRET).
+ * Verifies an admin user's access JWT (signed with JWT_ACCESS_SECRET, falling
+ * back to JWT_SECRET).
  * Checks token type, admin role, and Redis session revocation tombstone.
  * Used by all admin HTTP routes.
  */
@@ -55,8 +56,8 @@ export async function requireAdmin(req: Request, _res: Response, next: NextFunct
     }
 
     const token = authHeader.slice(7);
-    const { JWT_SECRET } = getEnv();
-    const payload = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
+    const { JWT_SECRET, JWT_ACCESS_SECRET } = getEnv();
+    const payload = jwt.verify(token, JWT_ACCESS_SECRET || JWT_SECRET) as jwt.JwtPayload;
 
     if (payload.type !== 'access') {
       throw new AppError(401, 'Invalid token type');

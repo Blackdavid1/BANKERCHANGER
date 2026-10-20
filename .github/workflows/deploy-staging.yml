@@ -1,0 +1,209 @@
+name: Deploy Staging Contracts
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: Stellar network to deploy to
+        required: true
+        type: choice
+        default: testnet
+        options:
+          - testnet
+          - futurenet
+      admin_secret_key:
+        description: Optional admin secret key override. Falls back to the ADMIN_SECRET_KEY repository secret.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Contract validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-staging-${{ hashFiles('contracts/Cargo.lock') }}
+
+      - name: Run Rust tests
+        working-directory: contracts
+        run: cargo test --workspace --all-features --locked
+
+      - name: Install cargo-audit
+        working-directory: contracts
+        run: cargo install cargo-audit --locked
+
+      - name: Run dependency audit
+        working-directory: contracts
+        run: cargo audit --locked --deny warnings
+
+  build-and-verify:
+    name: Build and verify WASM artifacts
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-staging-${{ hashFiles('contracts/Cargo.lock') }}
+
+      - name: Build Soroban contracts
+        working-directory: contracts
+        run: cargo build --release --target wasm32-unknown-unknown
+
+      - name: Compute and summarize WASM hashes
+        id: wasm_hashes
+        working-directory: contracts
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wasm-artifacts"
+          : > "$RUNNER_TEMP/wasm-artifacts/wasm-hashes.txt"
+
+          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
+            artifact_name="$(basename "$wasm")"
+            digest="$(sha256sum "$wasm" | awk '{print $1}')"
+            printf '%s %s\n' "$artifact_name" "$digest" >> "$RUNNER_TEMP/wasm-artifacts/wasm-hashes.txt"
+            echo "Artifact: $artifact_name => $digest"
+          done
+
+          market_digest="$(sha256sum target/wasm32-unknown-unknown/release/boxmeout_market.wasm | awk '{print $1}')"
+          echo "market_digest=$market_digest" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Staging WASM verification"
+            echo
+            echo "| Artifact | SHA-256 |"
+            echo "| --- | --- |"
+            while IFS=' ' read -r artifact digest; do
+              echo "| $artifact | $digest |"
+            done < "$RUNNER_TEMP/wasm-artifacts/wasm-hashes.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload WASM hash summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-wasm-hashes
+          path: ${{ runner.temp }}/wasm-artifacts/wasm-hashes.txt
+          retention-days: 30
+
+  deploy:
+    name: Deploy to staging network
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-staging-${{ hashFiles('contracts/Cargo.lock') }}
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli --features opt
+
+      - name: Build staging artifact
+        working-directory: contracts
+        run: cargo build --release --target wasm32-unknown-unknown
+
+      - name: Deploy contracts to staging
+        working-directory: contracts
+        env:
+          ADMIN_SECRET_KEY: ${{ inputs.admin_secret_key || secrets.ADMIN_SECRET_KEY }}
+          NETWORK: ${{ inputs.network }}
+          SOROBAN_RPC_URL: ${{ vars.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ADMIN_SECRET_KEY:-}" ]]; then
+            echo "ADMIN_SECRET_KEY is required to deploy staging contracts." >&2
+            exit 1
+          fi
+          ./scripts/deploy.sh "$NETWORK"
+
+      - name: Verify deployed WASM matches build hash
+        working-directory: contracts
+        env:
+          ADMIN_SECRET_KEY: ${{ inputs.admin_secret_key || secrets.ADMIN_SECRET_KEY }}
+          NETWORK: ${{ inputs.network }}
+          SOROBAN_RPC_URL: ${{ vars.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ADMIN_SECRET_KEY:-}" ]]; then
+            echo "ADMIN_SECRET_KEY is required for WASM verification." >&2
+            exit 1
+          fi
+
+          expected_hash="$(sha256sum target/wasm32-unknown-unknown/release/boxmeout_market.wasm | awk '{print $1}')"
+          deployed_hash="$(SOROBAN_RPC_URL="$SOROBAN_RPC_URL" stellar contract install \
+            --wasm target/wasm32-unknown-unknown/release/boxmeout_market.wasm \
+            --source "$ADMIN_SECRET_KEY" \
+            --network "$NETWORK" 2>&1 | grep -oE '[a-f0-9]{64}' | head -n 1)"
+
+          if [[ -z "$deployed_hash" ]]; then
+            echo "Unable to determine deployed bytecode hash from the Stellar network." >&2
+            exit 1
+          fi
+
+          echo "Expected market WASM SHA-256: $expected_hash"
+          echo "On-chain market WASM SHA-256: $deployed_hash"
+
+          if [[ "$deployed_hash" != "$expected_hash" ]]; then
+            echo "WASM mismatch: built artifact does not match the deployed bytecode on $NETWORK." >&2
+            exit 1
+          fi
+
+          {
+            echo "## Deployment verification"
+            echo
+            echo "Market WASM SHA-256: $deployed_hash"
+            echo "Network: $NETWORK"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload deployment summary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-deployment-summary
+          path: contracts/deployments.json
+          retention-days: 30

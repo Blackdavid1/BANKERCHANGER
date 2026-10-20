@@ -1,9 +1,16 @@
 node_modules
 npm-debug.log
+
+# Environment files – never bake secrets into the image
 .env
-.env.local
+.env.*
+*.env
+
 dist
 coverage
 *.db
 *.db-journal
 .DS_Store
+
+# Documentation
+*.md

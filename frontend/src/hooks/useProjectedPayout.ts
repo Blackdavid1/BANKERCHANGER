@@ -146,7 +146,9 @@ export function useProjectedPayout(
     // Zero-pool edge case: if side pool after is 0 (shouldn't happen since we add amount)
     if (sidePoolAfter === 0n) return null;
 
-    // fee_bps is in basis points (0–10000); scale factor = 10000 - fee_bps
+    // fee_bps is in basis points (0–10000); scale factor = 10000 - fee_bps.
+    // This nets the platform fee out of the projected payout — do not
+    // display payoutStroops without this factor applied.
     const feeFactor = BigInt(10_000 - liveMarket.fee_bps);
 
     // payout_stroops = (amountStroops * totalPoolAfter * feeFactor) / (sidePoolAfter * 10_000)

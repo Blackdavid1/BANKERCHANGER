@@ -42,6 +42,13 @@ export class StellarEventProcessor implements EventProcessor {
         await this.handleWinningsClaimed(event);
       } else if (eventType === 'refund_claimed') {
         await this.handleRefundClaimed(event);
+      } else {
+        // Log unknown event types to prevent silent data loss
+        console.warn(
+          `[Indexer] Unknown event type "${eventType}" on contract ${event.contract_address} ` +
+          `(tx: ${event.tx_hash}, ledger: ${event.ledger_sequence}). ` +
+          `Full event payload: ${JSON.stringify(event)}`,
+        );
       }
     } catch (err) {
       console.error(`Error processing event ${event.tx_hash}:`, err);
@@ -103,11 +110,12 @@ export class StellarEventProcessor implements EventProcessor {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(
+      const insertedBet = await client.query(
         `INSERT INTO bets
            (market_id, bettor_address, side, amount, amount_xlm, placed_at, tx_hash, ledger_sequence)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         ON CONFLICT (tx_hash) DO NOTHING`,
+        ON CONFLICT (tx_hash) DO NOTHING
+        RETURNING tx_hash`,
         [
           p.market_id,
           p.bettor_address,
@@ -119,16 +127,18 @@ export class StellarEventProcessor implements EventProcessor {
           event.ledger_sequence,
         ]
       );
-      const col =
-        p.side === 'fighter_a' ? 'pool_a' : p.side === 'fighter_b' ? 'pool_b' : 'pool_draw';
-      await client.query(
-        `UPDATE markets
-          SET ${col}      = ${col} + $1,
-              total_pool  = total_pool + $1,
-              updated_at  = NOW()
-        WHERE market_id   = $2`,
-        [p.amount, p.market_id]
-      );
+      if (insertedBet.rows.length > 0) {
+        const col =
+          p.side === 'fighter_a' ? 'pool_a' : p.side === 'fighter_b' ? 'pool_b' : 'pool_draw';
+        await client.query(
+          `UPDATE markets
+            SET ${col}      = ${col} + $1,
+                total_pool  = total_pool + $1,
+                updated_at  = NOW()
+          WHERE market_id   = $2`,
+          [p.amount, p.market_id]
+        );
+      }
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
@@ -136,6 +146,9 @@ export class StellarEventProcessor implements EventProcessor {
     } finally {
       client.release();
     }
+
+    const { engagementService } = await import('../services/engagement.service');
+    await engagementService.recordBetPlaced(p.bettor_address, event.tx_hash);
   }
 
   private async handleMarketLocked(event: RawStellarEvent): Promise<void> {
@@ -186,8 +199,32 @@ export class StellarEventProcessor implements EventProcessor {
       client.release();
     }
 
+    // Gamification: credit prediction streaks to winning bettors and broadcast
+    // real-time leaderboard rank updates.
+    await this.creditEngagementStreaks(p.market_id, p.outcome);
+
     await cacheDeletePattern(`market:${p.market_id}*`);
     await cacheDeletePattern(`markets:*`);
+  }
+
+  /**
+   * After a market resolves, update the engagement streak for every bettor who
+   * backed the winning side and emit leaderboard rank updates over WebSocket.
+   */
+  private async creditEngagementStreaks(marketId: string, outcome: string | undefined): Promise<void> {
+    if (!outcome) return;
+    try {
+      const { rows: winners } = await pool.query(
+        `SELECT bettor_address FROM bets WHERE market_id = $1 AND side = $2`,
+        [marketId, outcome]
+      );
+      const { engagementService } = await import('../services/engagement.service');
+      for (const winner of winners) {
+        await engagementService.recordPredictionResult(winner.bettor_address, true);
+      }
+    } catch (err) {
+      console.error(`[Indexer] Error crediting engagement streaks for market ${marketId}:`, err);
+    }
   }
 
   private async handleMarketCancelled(event: RawStellarEvent): Promise<void> {

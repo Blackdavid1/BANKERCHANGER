@@ -80,11 +80,20 @@ const transporter = createTransporter();
 // Template rendering
 // ---------------------------------------------------------------------------
 
+function escapeHtml(val: string): string {
+  return val
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
+
 function renderTemplate(template: EmailTemplate, data: Record<string, string>): string {
   const filePath = path.join(TEMPLATES_DIR, `${template}.html`);
   let html = fs.readFileSync(filePath, 'utf-8');
   for (const [key, value] of Object.entries(data)) {
-    html = html.replaceAll(`{{${key}}}`, value);
+    html = html.replaceAll(`{{${key}}}`, escapeHtml(value));
   }
   return html;
 }

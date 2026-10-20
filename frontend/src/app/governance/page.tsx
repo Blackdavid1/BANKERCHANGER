@@ -4,74 +4,60 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { Proposal, ProposalStatus } from '@/types';
 
-// Mock proposals for the UI
-const MOCK_PROPOSALS: Proposal[] = [
-  {
-    id: 'prop_1',
-    type: 'fee_rate',
-    value: 40,
-    description: 'Increase the fee rate to 40 bps to support the treasury.',
-    status: 'Active',
-    proposer: 'CBX...4A',
-    votesFor: 50000,
-    votesAgainst: 15000,
-    votesAbstain: 5000,
-    createdAt: new Date(Date.now() - 86400000 * 2).toISOString(), // 2 days ago
-    expiresAt: new Date(Date.now() + 86400000 * 5).toISOString(), // 5 days from now
-  },
-  {
-    id: 'prop_2',
-    type: 'add_token',
-    value: 'CBZ...X1',
-    description: 'Add USDC to the approved token list for market settlements.',
-    status: 'Passed',
-    proposer: 'CCM...9Z',
-    votesFor: 120000,
-    votesAgainst: 10000,
-    votesAbstain: 0,
-    createdAt: new Date(Date.now() - 86400000 * 10).toISOString(),
-    expiresAt: new Date(Date.now() - 86400000 * 3).toISOString(),
-  },
-  {
-    id: 'prop_3',
-    type: 'max_discount_rate',
-    value: 600,
-    description: 'Change the maximum discount rate to 600 bps.',
-    status: 'Executed',
-    proposer: 'CDM...8B',
-    votesFor: 80000,
-    votesAgainst: 20000,
-    votesAbstain: 2000,
-    createdAt: new Date(Date.now() - 86400000 * 20).toISOString(),
-    expiresAt: new Date(Date.now() - 86400000 * 13).toISOString(),
-  },
-  {
-    id: 'prop_4',
-    type: 'remove_token',
-    value: 'CBY...Z3',
-    description: 'Remove AQUA from the approved tokens due to low liquidity.',
-    status: 'Failed',
-    proposer: 'CBM...1A',
-    votesFor: 30000,
-    votesAgainst: 90000,
-    votesAbstain: 10000,
-    createdAt: new Date(Date.now() - 86400000 * 15).toISOString(),
-    expiresAt: new Date(Date.now() - 86400000 * 8).toISOString(),
-  }
-];
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const PROPOSALS_PER_PAGE = 20;
 
 export default function GovernanceList() {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [statusFilter, setStatusFilter] = useState<ProposalStatus | 'All'>('All');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Mock network fetch
-    setProposals(MOCK_PROPOSALS);
-  }, []);
+    fetchProposals();
+  }, [currentPage, statusFilter]);
 
-  const filteredProposals = proposals.filter((p) => 
-    statusFilter === 'All' || p.status === statusFilter
-  );
+  const fetchProposals = async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const statusParam = statusFilter === 'All' ? '' : `&status=${statusFilter.toLowerCase()}`;
+      const url = `${API_BASE_URL}/api/governance/proposals?page=${currentPage}&limit=${PROPOSALS_PER_PAGE}${statusParam}`;
+      
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+      
+      const json = await response.json();
+      if (!json.success) {
+        throw new Error(json.error || 'Failed to fetch proposals');
+      }
+
+      setProposals(json.data || []);
+      setTotalPages(json.pagination?.totalPages || 1);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load proposals');
+      setProposals([]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleStatusChange = (newStatus: ProposalStatus | 'All') => {
+    setStatusFilter(newStatus);
+    setCurrentPage(1); // Reset to first page when filter changes
+  };
+
+  const handlePreviousPage = () => {
+    setCurrentPage(p => Math.max(1, p - 1));
+  };
+
+  const handleNextPage = () => {
+    setCurrentPage(p => Math.min(totalPages, p + 1));
+  };
 
   return (
     <div className="max-w-4xl mx-auto p-8">
@@ -83,8 +69,9 @@ export default function GovernanceList() {
         <div className="flex gap-4">
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as any)}
+            onChange={(e) => handleStatusChange(e.target.value as any)}
             className="px-4 py-2 bg-gray-800 border border-gray-700 rounded text-sm font-medium"
+            disabled={isLoading}
           >
             <option value="All">All Proposals</option>
             <option value="Active">Active</option>
@@ -94,24 +81,61 @@ export default function GovernanceList() {
           </select>
           <Link 
             href="/governance/new" 
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium transition-colors"
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium transition-colors disabled:opacity-50"
           >
             New Proposal
           </Link>
         </div>
       </div>
 
-      <div className="space-y-4">
-        {filteredProposals.length === 0 ? (
-          <div className="text-center p-8 bg-gray-800/50 rounded-xl border border-gray-700">
-            <p className="text-gray-400">No proposals found matching this filter.</p>
+      {error && (
+        <div className="p-4 mb-4 bg-red-500/10 border border-red-500/20 rounded text-red-400">
+          {error}
+        </div>
+      )}
+
+      {isLoading ? (
+        <div className="text-center p-8 text-gray-400">Loading proposals...</div>
+      ) : (
+        <>
+          <div className="space-y-4">
+            {proposals.length === 0 ? (
+              <div className="text-center p-8 bg-gray-800/50 rounded-xl border border-gray-700">
+                <p className="text-gray-400">No proposals found matching this filter.</p>
+              </div>
+            ) : (
+              proposals.map((proposal) => (
+                <ProposalCard key={proposal.id} proposal={proposal} />
+              ))
+            )}
           </div>
-        ) : (
-          filteredProposals.map((proposal) => (
-            <ProposalCard key={proposal.id} proposal={proposal} />
-          ))
-        )}
-      </div>
+
+          {/* Pagination controls */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between mt-8 pt-8 border-t border-gray-700">
+              <div className="text-sm text-gray-400">
+                Page {currentPage} of {totalPages}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handlePreviousPage}
+                  disabled={currentPage === 1 || isLoading}
+                  className="px-4 py-2 bg-gray-800 border border-gray-700 rounded text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-700"
+                >
+                  Previous
+                </button>
+                <button
+                  onClick={handleNextPage}
+                  disabled={currentPage === totalPages || isLoading}
+                  className="px-4 py-2 bg-gray-800 border border-gray-700 rounded text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-700"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

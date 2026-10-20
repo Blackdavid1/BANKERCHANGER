@@ -76,6 +76,10 @@ playwright/.cache/
 frontend/e2e/snapshots/
 frontend/e2e/test-results/
 
+# ─── Soroban test artifacts ──────────────────────────────────
+**/test_snapshots/
+**/proptest-regressions/
+
 # ─── Playwright artifacts ────────────────────────────────────
 blob-report/
 playwright/.auth/

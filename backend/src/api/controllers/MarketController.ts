@@ -103,6 +103,9 @@ export async function getMarket(
     const market = await MarketService.getMarketById(market_id);
     res.status(200).json(market);
   } catch (err) {
+    if (err instanceof AppError && err.statusCode === 404) {
+      return next(err);
+    }
     next(err);
   }
 }
