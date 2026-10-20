@@ -10,13 +10,7 @@ import { pool } from '../config/db';
 import { rpc, Address, xdr } from '@stellar/stellar-sdk';
 import { subscribeToContractEvents, fetchHistoricalEvents } from '../services/StellarService';
 import { cacheDeletePattern } from '../services/cache.service';
-import { tryGetActivityFeed, getActivityFeedIfInitialized, type ActivityEvent } from '../websocket/realtime';
-import {
-  findMissingRanges,
-  getProcessedRanges,
-  getLastProcessedLedger as getTrackerLastProcessed,
-  recordProcessedRange,
-} from './ledgerTracker';
+import { broadcastMarketResolved } from '../websocket/realtime';
 
 // Raw event shape returned by Stellar RPC / Horizon
 export interface RawStellarEvent {
@@ -204,7 +198,7 @@ export async function pollOnce(lastProcessed: number): Promise<number> {
     const missing = findMissingRanges(fromLedger + 1, latestLedger, ranges);
     for (const range of missing) {
       console.log(`[Indexer] Backfilling missing ledgers ${range.start}–${range.end}`);
-      await backfillAndRecord(range.start, range.end);
+      await backfillMissingLedgers(range.start, range.end, 100);
       lastProcessed = Math.max(lastProcessed, range.end);
     }
   } catch (err) {
@@ -228,11 +222,53 @@ export async function pollOnce(lastProcessed: number): Promise<number> {
   return lastProcessed;
 }
 
-async function backfillAndRecord(from: number, to: number): Promise<void> {
-  for (let seq = from; seq <= to; seq++) {
-    await processLedger(seq);
+/**
+ * Recovers missing ledgers across detected gaps (Issue #673).
+ * Fetches and processes missing ledgers in batches of 100, tracking progress
+ * incrementally in the database and emitting the indexer_gap_backfill_total metric.
+ */
+export async function backfillMissingLedgers(
+  from: number,
+  to: number,
+  batchSize: number = 100
+): Promise<number> {
+  let totalProcessed = 0;
+
+  for (let batchStart = from; batchStart <= to; batchStart += batchSize) {
+    const batchEnd = Math.min(batchStart + batchSize - 1, to);
+
+    for (let seq = batchStart; seq <= batchEnd; seq++) {
+      try {
+        await processLedger(seq);
+      } catch (err) {
+        if (isLedgerRangeError(err)) {
+          console.warn(`[Indexer] Ledger ${seq} unavailable during backfill, skipping`, err);
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    // Persist checkpoint and range incrementally so interrupted backfills resume from last batch
+    await recordProcessedRange(batchStart, batchEnd);
+    await saveCheckpoint(batchEnd);
+
+    const count = batchEnd - batchStart + 1;
+    totalProcessed += count;
+
+    try {
+      const { indexerGapBackfillTotal } = await import('../services/metrics.service');
+      indexerGapBackfillTotal.inc(count);
+    } catch {
+      // Metric service fallback
+    }
   }
-  await recordProcessedRange(from, to);
+
+  return totalProcessed;
+}
+
+async function backfillAndRecord(from: number, to: number): Promise<void> {
+  await backfillMissingLedgers(from, to, 100);
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +497,15 @@ function broadcastIndexedEvent(event: RawStellarEvent): void {
   const marketId = typeof p.market_id === 'string' ? p.market_id : '';
   if (!marketId) return;
 
+  if (event.event_type === 'market_created') {
+    feed.publishMarketCreated({
+      type: 'market:created',
+      marketId,
+      fighterA: String(p.fighter_a ?? ''),
+      fighterB: String(p.fighter_b ?? ''),
+    });
+  }
+
   let activityEvent: ActivityEvent;
   if (event.event_type === 'bet_placed') {
     activityEvent = {
@@ -533,26 +578,37 @@ export async function handleMarketCreated(event: RawStellarEvent): Promise<void>
 
 export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
   const p = parsePayload(event.data);
+  const eventValue = asRecord(p.value) ?? p;
+  const bet = asRecord(eventValue.bet) ?? asRecord(p.bet) ?? eventValue;
+  const oddsSnapshot =
+    asRecord(eventValue.odds_at_bet_time) ??
+    asRecord(p.odds_at_bet_time) ??
+    asRecord(eventValue.odds_snapshot) ??
+    asRecord(p.odds_snapshot) ??
+    null;
+  const marketId = bet.market_id ?? eventValue.market_id ?? p.market_id;
+  const bettorAddress = bet.bettor_address ?? bet.bettor;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query(
       `INSERT INTO bets
-         (market_id, bettor_address, side, amount, amount_xlm, placed_at, tx_hash, ledger_sequence)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         (market_id, bettor_address, side, amount, amount_xlm, odds_snapshot, placed_at, tx_hash, ledger_sequence)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        ON CONFLICT (tx_hash) DO NOTHING`,
       [
-        p.market_id,
-        p.bettor_address,
-        p.side,
-        p.amount,
-        Number(p.amount) / 10_000_000,
-        p.placed_at ?? new Date(),
+        marketId,
+        bettorAddress,
+        bet.side,
+        bet.amount,
+        Number(bet.amount) / 10_000_000,
+        oddsSnapshot,
+        bet.placed_at ?? eventValue.placed_at ?? new Date(),
         event.tx_hash,
         event.ledger_sequence,
       ],
     );
-    const col = p.side === 'fighter_a' ? 'pool_a' : p.side === 'fighter_b' ? 'pool_b' : 'pool_draw';
+    const col = bet.side === 'fighter_a' ? 'pool_a' : bet.side === 'fighter_b' ? 'pool_b' : 'pool_draw';
     const { rows: [pools] } = await client.query(
       `UPDATE markets
           SET ${col}      = ${col} + $1,
@@ -560,7 +616,7 @@ export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
               updated_at  = NOW()
         WHERE market_id   = $2
         RETURNING ${col} AS side_pool, total_pool`,
-      [p.amount, p.market_id],
+      [bet.amount, marketId],
     );
     await client.query('COMMIT');
 
@@ -568,10 +624,10 @@ export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
     const sidePool = Number(pools?.side_pool ?? 0);
     publishActivity({
       type: 'trade',
-      marketId: String(p.market_id),
-      outcomeId: String(p.side),
-      side: String(p.side),
-      sharesAmount: Number(p.amount),
+      marketId: String(marketId),
+      outcomeId: String(bet.side),
+      side: String(bet.side),
+      sharesAmount: Number(bet.amount),
       priceBps: totalPool > 0 ? Math.round((sidePool / totalPool) * 10_000) : 0,
       timestamp: new Date().toISOString(),
     });
@@ -581,6 +637,12 @@ export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
   } finally {
     client.release();
   }
+}
+
+function asRecord(value: unknown): Record<string, any> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, any>
+    : null;
 }
 
 export async function handleMarketLocked(event: RawStellarEvent): Promise<void> {
@@ -596,6 +658,7 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
   const outcome = typeof p.outcome === 'string' ? p.outcome : null;
   const marketId = typeof p.market_id === 'string' ? p.market_id : null;
   const client = await pool.connect();
+  let winnerOdds = 0;
   try {
     await client.query('BEGIN');
 
@@ -615,6 +678,25 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
       [outcome, resolvedAt, oracleAddress ?? null, marketId],
     );
 
+    const { rows: [market] } = await client.query(
+      `SELECT pool_a, pool_b, pool_draw, total_pool, fee_bps
+         FROM markets WHERE market_id = $1`,
+      [p.market_id],
+    );
+    if (market && p.outcome !== 'no_contest') {
+      const winningPool = BigInt(
+        p.outcome === 'fighter_a' ? market.pool_a :
+        p.outcome === 'fighter_b' ? market.pool_b :
+        p.outcome === 'draw' ? market.pool_draw : '0',
+      );
+      const totalPool = BigInt(market.total_pool);
+      if (winningPool > 0n && totalPool > 0n) {
+        const fee = (totalPool * BigInt(market.fee_bps)) / 10000n;
+        winnerOdds = Number(((totalPool - fee) * 10000n) / winningPool);
+      }
+    }
+
+    // Insert OracleReport record
     await client.query(
       `INSERT INTO oracle_reports
          (match_id, oracle_address, outcome, reported_at, signature, accepted, tx_hash)
@@ -651,7 +733,12 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
     client.release();
   }
 
-  await cacheDeletePattern(`market:${marketId}*`);
+  if (typeof p.market_id === 'string' && typeof p.outcome === 'string') {
+    broadcastMarketResolved(p.market_id, p.outcome, winnerOdds);
+  }
+
+  // Invalidate all Redis cache keys for this market
+  await cacheDeletePattern(`market:${p.market_id}*`);
   await cacheDeletePattern(`markets:*`);
 
   if (marketId) {

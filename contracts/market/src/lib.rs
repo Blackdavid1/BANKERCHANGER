@@ -54,20 +54,20 @@ const LP_TOTAL_SHARES: &str = "LP_TOTAL_SHARES";
 const LP_PREFIX: &str       = "LP";
 /// Accumulated fee-per-LP-share in micro-units (scaled by 1_000_000)
 const LP_FEE_PER_SHARE: &str = "LP_FEE_PER_SHARE";
+/// Storage key for whether Draw outcome is permitted
+const ALLOW_DRAW: &str       = "ALLOW_DRAW";
 /// Seed liquidity minimum — 1 XLM per pool side
 const MIN_SEED_LIQUIDITY: i128 = 10_000_000;
+/// Persistent key for betting token contract address
+const TOKEN: &str = "TOKEN";
+/// Grace period (24 hours) after scheduled fight start before expired market is refundable
+pub const EXPIRY_GRACE_PERIOD: u64 = 86_400;
 
 // ─── Storage TTL Constants ────────────────────────────────────────────────────
-/// Maximum TTL for market data expressed in ledgers.
-/// At ~5 seconds per ledger: 30 days × 24 h × 60 min × 12 ledgers/min = 518_400 ledgers.
-/// Using ledger counts (not seconds) as required by Soroban's extend_ttl API.
-const MAX_TTL: u32 = 518_400;
-
-/// Fallback maximum price impact (slippage) when no tier is set, in basis points.
-/// Used in `emit_slippage_checked` for legacy / no-tier markets.
-/// 3000 bps = 30 % — protects bettors from placing inadvertently large
-/// orders into thin pools that would give them very poor execution.
-const MAX_SLIPPAGE_BPS: i128 = 3_000;
+/// Maximum TTL for market data (30 days in ledger entries)
+const MAX_TTL: u32 = 2_592_000;
+/// Maximum age for unresolved oracle reports before stale entries are pruned.
+const REPORT_TTL: u64 = 172_800;
 
 // ─── Cross-contract client for oracle whitelist check ─────────────────────────
 #[contractclient(name = "FactoryClient")]
@@ -79,6 +79,12 @@ pub trait FactoryInterface {
     fn get_admin(env: Env) -> Address;
 }
 
+// ─── Cross-contract client for treasury fee deposits ─────────────────────────
+#[contractclient(name = "TreasuryClient")]
+pub trait TreasuryInterface {
+    fn deposit(env: Env, fee_amount: i128) -> Result<(), ContractError>;
+}
+
 #[contract]
 pub struct Market;
 
@@ -88,7 +94,7 @@ impl Market {
     fn require_not_paused(env: &Env) -> Result<(), ContractError> {
         let paused: bool = env.storage().instance().get(&PAUSED).unwrap_or(false);
         if paused {
-            return Err(ContractError::InvalidMarketStatus);
+            return Err(ContractError::MarketPaused);
         }
         Ok(())
     }
@@ -140,6 +146,17 @@ impl Market {
             .extend_ttl(&key, MAX_TTL, MAX_TTL);
     }
 
+    fn exceeds_bet_share_cap(user_total: i128, pool_total: i128, cap_bps: u32) -> bool {
+        if pool_total <= 0 {
+            return false;
+        }
+
+        let cap_bps = i128::from(cap_bps);
+        let max_user_total = (pool_total / 10_000) * cap_bps
+            + ((pool_total % 10_000) * cap_bps) / 10_000;
+        user_total > max_user_total
+    }
+
     fn is_oracle_whitelisted(env: &Env, caller: &Address) -> Result<bool, ContractError> {
         let factory: Address = env
             .storage()
@@ -162,7 +179,7 @@ impl Market {
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         let client = FactoryClient::new(env, &factory);
-        Ok(client.get_oracle_key(caller))
+        Ok(client.get_oracle_key(&caller.clone()))
     }
 
     /// Extend TTL on market data entries to prevent premature expiration.
@@ -173,6 +190,38 @@ impl Market {
         env.storage()
             .persistent()
             .extend_ttl(&BETTOR_LIST, MAX_TTL, MAX_TTL);
+    }
+
+    /// Extends the TTL of all persistent share and market entries by CLAIM_WINDOW_LEDGERS upon resolution.
+    fn extend_resolution_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(CLAIM_WINDOW_LEDGERS, CLAIM_WINDOW_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&STATE, CLAIM_WINDOW_LEDGERS, CLAIM_WINDOW_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&BETTOR_LIST, CLAIM_WINDOW_LEDGERS, CLAIM_WINDOW_LEDGERS);
+        let bettor_list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&BETTOR_LIST)
+            .unwrap_or_else(|| Vec::new(env));
+        for bettor in bettor_list.iter() {
+            let key = Self::bet_key(env, &bettor);
+            if env.storage().persistent().has(&key) {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, CLAIM_WINDOW_LEDGERS, CLAIM_WINDOW_LEDGERS);
+            }
+        }
+        let lp_total_shares: i128 = env.storage().persistent().get(&LP_TOTAL_SHARES).unwrap_or(0);
+        if lp_total_shares > 0 {
+            env.storage()
+                .persistent()
+                .extend_ttl(&LP_TOTAL_SHARES, CLAIM_WINDOW_LEDGERS, CLAIM_WINDOW_LEDGERS);
+        }
     }
 
     fn lp_key(env: &Env, provider: &Address) -> (Symbol, Address) {
@@ -193,6 +242,16 @@ impl Market {
     fn remove_lp_position(env: &Env, provider: &Address) {
         let key = Self::lp_key(env, provider);
         env.storage().persistent().remove(&key);
+    }
+
+    fn get_allow_draw(env: &Env) -> bool {
+        if let Some(val) = env.storage().persistent().get(&ALLOW_DRAW) {
+            return val;
+        }
+        if let Some(val) = env.storage().persistent().get(&Symbol::new(env, "allow_draw")) {
+            return val;
+        }
+        true
     }
 }
 
@@ -277,7 +336,8 @@ impl Market {
     /// - `MarketNotOpen`: Market is not open or fight is in the past
     /// - `InvalidTimeRange`: Betting window has not opened or deadline is invalid
     /// - `BetTooLow`: Bet amount is below minimum
-    /// - `BetTooLarge`: Bet amount exceeds maximum
+    /// - `BetTooLarge`: Bet amount exceeds the per-bet maximum
+    /// - `BetLimitExceeded`: Bet would exceed the bettor's maximum share of the pool
     /// - `SlippageExceeded`: Computed AMM shares are below `min_shares_out`
     ///
     /// # Security (CEI enforced)
@@ -318,6 +378,20 @@ impl Market {
         }
         if amount > state.config.max_bet {
             return Err(ContractError::BetTooLarge);
+        }
+
+        let mut bets = Self::load_bets(&env, &bettor);
+        let user_total = bets
+            .iter()
+            .fold(0i128, |total, bet| total.saturating_add(bet.amount));
+        let user_total_after_bet = user_total.saturating_add(amount);
+        let pool_total_after_bet = state.total_pool.saturating_add(amount);
+        if Self::exceeds_bet_share_cap(
+            user_total_after_bet,
+            pool_total_after_bet,
+            state.config.max_bet_share_bps,
+        ) {
+            return Err(ContractError::BetLimitExceeded);
         }
 
         // Slippage / price-impact sanity check.
@@ -399,11 +473,21 @@ impl Market {
             claimed: false,
         };
 
-        let mut bets = Self::load_bets(&env, &bettor);
-        if !bets.is_empty() {
-            return Err(ContractError::AlreadyBet);
-        }
-        let is_first_bet = true;
+        let odds_at_bet_time = if state.total_pool > 0 {
+            boxmeout_shared::types::OddsSnapshot {
+                odds_a: (state.pool_a * 10_000 / state.total_pool) as u32,
+                odds_b: (state.pool_b * 10_000 / state.total_pool) as u32,
+                odds_draw: (state.pool_draw * 10_000 / state.total_pool) as u32,
+            }
+        } else {
+            boxmeout_shared::types::OddsSnapshot {
+                odds_a: 0,
+                odds_b: 0,
+                odds_draw: 0,
+            }
+        };
+
+        let is_first_bet = bets.is_empty();
         bets.push_back(bet.clone());
         Self::save_bets(&env, &bettor, &bets);
 
@@ -417,6 +501,10 @@ impl Market {
             env.storage().persistent().set(&BETTOR_LIST, &bettor_list);
         }
 
+        if !env.storage().persistent().has(&TOKEN) {
+            env.storage().persistent().set(&TOKEN, &token);
+        }
+
         // Extend TTL on each bet to keep market active
         Self::extend_market_ttl(&env);
 
@@ -424,7 +512,27 @@ impl Market {
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&bettor, &env.current_contract_address(), &amount);
 
-        boxmeout_shared::emit_bet_placed(&env, new_state.market_id, bet.clone());
+        // Platform fee routing to Treasury (Issue #636)
+        let fee_amount = if new_state.config.fee_bps > 0 {
+            amount.checked_mul(new_state.config.fee_bps as i128).unwrap_or(0) / 10_000
+        } else {
+            0
+        };
+
+        if fee_amount > 0 {
+            if let Some(treasury) = env.storage().persistent().get::<_, Address>(&TREASURY) {
+                // Route fees to treasury (no direct token transfers to admin address)
+                token_client.transfer(&env.current_contract_address(), &treasury, &fee_amount);
+                let _ = TreasuryClient::new(&env, &treasury).try_deposit(&fee_amount);
+            }
+        }
+
+        boxmeout_shared::emit_bet_placed_with_odds(
+            &env,
+            new_state.market_id,
+            bet.clone(),
+            odds_at_bet_time,
+        );
 
         // ── AMM PIPELINE EVENTS (issues #473–#476) ────────────────────────────
         // Emit pool_initialized when all three pools are now non-zero for the
@@ -558,16 +666,11 @@ impl Market {
             .get(&LP_FEE_PER_SHARE)
             .unwrap_or(0);
 
-        let lp_shares = if total_shares == 0 || state.total_pool == 0 {
-            // First liquidity: mint shares equal to total input (1:1 seed)
-            total_in
-        } else {
-            // Subsequent liquidity: proportional to existing pool
-            total_in
-                .checked_mul(total_shares)
-                .and_then(|v| v.checked_div(state.total_pool))
-                .ok_or(ContractError::InsufficientAmount)?
-        };
+        let lp_shares = boxmeout_shared::amm::calc_lp_shares_to_mint(
+            total_in,
+            state.total_pool,
+            total_shares,
+        ).ok_or(ContractError::InsufficientAmount)?;
 
         if lp_shares < min_lp_shares_out {
             return Err(ContractError::SlippageExceeded);
@@ -661,24 +764,13 @@ impl Market {
             .unwrap_or(0);
 
         // Compute proportional withdrawal amounts
-        let share_ratio_num = lp_shares_to_burn;
-        let share_ratio_den = total_shares;
-
-        let withdraw_a = if share_ratio_den > 0 {
-            state.pool_a.checked_mul(share_ratio_num)
-                .and_then(|v| v.checked_div(share_ratio_den))
-                .unwrap_or(0)
-        } else { 0 };
-        let withdraw_b = if share_ratio_den > 0 {
-            state.pool_b.checked_mul(share_ratio_num)
-                .and_then(|v| v.checked_div(share_ratio_den))
-                .unwrap_or(0)
-        } else { 0 };
-        let withdraw_draw = if share_ratio_den > 0 {
-            state.pool_draw.checked_mul(share_ratio_num)
-                .and_then(|v| v.checked_div(share_ratio_den))
-                .unwrap_or(0)
-        } else { 0 };
+        let (withdraw_a, withdraw_b, withdraw_draw) = boxmeout_shared::amm::calc_lp_withdrawal_amounts(
+            lp_shares_to_burn,
+            total_shares,
+            state.pool_a,
+            state.pool_b,
+            state.pool_draw,
+        ).ok_or(ContractError::InsufficientAmount)?;
         let total_out = withdraw_a
             .saturating_add(withdraw_b)
             .saturating_add(withdraw_draw);
@@ -812,11 +904,13 @@ impl Market {
             return Err(ContractError::InvalidMarketStatus);
         }
 
+        if report.outcome == Outcome::Draw && !Self::get_allow_draw(&env) {
+            return Err(ContractError::DrawNotAllowed);
+        }
+
         if env.ledger().timestamp() < state.fight.scheduled_at {
             return Err(ContractError::MarketNotStarted);
         }
-
-        let deadline = state.fight.scheduled_at
 
         let deadline = state
             .fight
@@ -894,8 +988,6 @@ impl Market {
             OptionalMarketTier::None => 0,
         };
 
-        let outcome_byte: u32 = match report.outcome {
-
         // Emit structured event for real-time frontend progress updates
         let outcome_index: u32 = match report.outcome {
             Outcome::FighterA  => 0,
@@ -903,6 +995,7 @@ impl Market {
             Outcome::Draw      => 2,
             Outcome::NoContest => 3,
         };
+        let outcome_byte: u32 = outcome_index;
 
         // Emit oracle_report_received so frontends can track resolution progress.
         boxmeout_shared::emit_oracle_report_received(
@@ -912,10 +1005,6 @@ impl Market {
             outcome_byte,
             pending.len(),
         );
-
-        // Resolve if we have 2 matching reports (2-of-3 consensus, issues #473–#476).
-        let consensus_threshold = boxmeout_shared::amm::tier_oracle_consensus_threshold(tier_byte);
-        if matching_count >= consensus_threshold {
 
         boxmeout_shared::emit_oracle_report_submitted(
             &env,
@@ -928,7 +1017,8 @@ impl Market {
         // Circuit Breaker: when consensus is reached, enter ResolutionPending
         // instead of immediately resolving. This gives admins a configurable
         // cooldown window to raise a dispute before payouts are unlocked.
-        if matching_count >= 2 {
+        let consensus_threshold = boxmeout_shared::amm::tier_oracle_consensus_threshold(tier_byte);
+        if matching_count >= consensus_threshold {
             state.outcome = OptionalOutcome::Some(report.outcome.clone());
 
             // Determine cooldown length (ledgers). Fall back to the default if
@@ -945,6 +1035,7 @@ impl Market {
             state.oracle_used = OptionalOracleRole::Some(OracleRole::Primary);
             Self::save_state(&env, &state);
             Self::extend_market_ttl(&env);
+            Self::extend_resolution_ttl(&env);
 
             // Persist the cooldown end ledger so finalize_resolution can check it.
             env.storage()
@@ -968,7 +1059,7 @@ impl Market {
             boxmeout_shared::emit_market_resolution_pending(
                 &env,
                 state.market_id,
-                outcome_byte,
+                outcome_byte as u8,
                 cooldown_end_ledger,
             );
         } else if conflicting_count > 0 && matching_count == 1 {
@@ -979,99 +1070,39 @@ impl Market {
         Ok(())
     }
 
-    /// Clears oracle reports from PENDING_REPORTS that are older than REPORT_TTL.
-    /// Callable by factory / admin. Returns the number of evicted reports.
-    pub fn clear_stale_reports(env: Env, caller: Address) -> Result<u32, ContractError> {
-        caller.require_auth();
+    /// Removes stale pending oracle reports older than REPORT_TTL.
+    ///
+    /// Intended for admin cleanup when a previous resolution round stalls and
+    /// newer reports need to be accepted again.
+    pub fn clear_stale_reports(env: Env, admin: Address) -> Result<u32, ContractError> {
+        admin.require_auth();
         let factory: Address = env
-            .storage()
-            .persistent()
+            .storage().persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
-        if caller != factory {
-            return Err(ContractError::Unauthorized);
+        if admin != factory {
+            return Err(ContractError::NotAdmin);
         }
 
-        let pending: Map<Address, OracleReport> = env
-            .storage()
+        let mut pending: Map<Address, OracleReport> = env.storage()
             .persistent()
             .get(&PENDING_REPORTS)
             .unwrap_or_else(|| Map::new(&env));
-        let now = env.ledger().timestamp();
-        let mut updated: Map<Address, OracleReport> = Map::new(&env);
-        let mut cleared = 0u32;
 
-        for (addr, rep) in pending.iter() {
-            if now.saturating_sub(rep.reported_at) >= REPORT_TTL {
-                cleared += 1;
+        let now = env.ledger().timestamp();
+        let mut retained: Map<Address, OracleReport> = Map::new(&env);
+        let mut cleared_count = 0u32;
+
+        for (oracle, report) in pending.iter() {
+            if now.saturating_sub(report.submitted_at) >= REPORT_TTL {
+                cleared_count += 1;
             } else {
-                updated.set(addr, rep);
+                retained.set(oracle, report);
             }
         }
 
-        env.storage().persistent().set(&PENDING_REPORTS, &updated);
-        Ok(cleared)
-    }
-
-    // =========================================================================
-    // FINALIZE RESOLUTION — callable by anyone after cooldown window
-    // =========================================================================
-    /// Finalizes a market that is in `ResolutionPending` state once the dispute
-    /// cooldown window has elapsed.
-    ///
-    /// This function is permissionless — any address can call it once the
-    /// `cooldown_end_ledger` has been passed, which avoids relying on a
-    /// privileged keeper bot.
-    ///
-    /// If the cooldown window is still active this function returns
-    /// `DisputeCooldownActive`. If the market has been moved to `Disputed`
-    /// (admin froze the resolution) this returns `ResolutionNotPending`.
-    ///
-    /// # Errors
-    /// - `ResolutionNotPending`: Market is not in ResolutionPending state
-    /// - `DisputeCooldownActive`: Cooldown window has not yet elapsed
-    pub fn finalize_resolution(env: Env) -> Result<(), ContractError> {
-        Self::require_not_paused(&env)?;
-
-        let mut state = Self::load_state(&env)?;
-
-        // Only valid to call when the market is waiting for the cooldown to expire.
-        if state.status != MarketStatus::ResolutionPending {
-            return Err(ContractError::ResolutionNotPending);
-        }
-
-        // Check that the cooldown window has elapsed.
-        let cooldown_end_ledger: u32 = env
-            .storage()
-            .persistent()
-            .get(&COOLDOWN_END_LEDGER)
-            .unwrap_or(0);
-
-        if env.ledger().sequence() < cooldown_end_ledger {
-            return Err(ContractError::DisputeCooldownActive);
-        }
-
-        // ── EFFECTS ──────────────────────────────────────────────────────────
-        state.status = MarketStatus::Resolved;
-        state.resolved_at = env.ledger().timestamp();
-        Self::save_state(&env, &state);
-        Self::extend_market_ttl(&env);
-
-        // Clean up the cooldown ledger entry — no longer needed.
-        env.storage().persistent().remove(&COOLDOWN_END_LEDGER);
-
-        let outcome_byte: u8 = match &state.outcome {
-            OptionalOutcome::Some(o) => match o {
-                boxmeout_shared::types::Outcome::FighterA => 0,
-                boxmeout_shared::types::Outcome::FighterB => 1,
-                boxmeout_shared::types::Outcome::Draw => 2,
-                boxmeout_shared::types::Outcome::NoContest => 3,
-            },
-            OptionalOutcome::None => return Err(ContractError::InvalidOutcome),
-        };
-
-        boxmeout_shared::emit_resolution_finalized(&env, state.market_id, outcome_byte);
-        Ok(())
+        env.storage().persistent().set(&PENDING_REPORTS, &retained);
+        Ok(cleared_count)
     }
 
     // =========================================================================
@@ -1091,6 +1122,14 @@ impl Market {
     /// 3. INTERACTIONS: treasury fee transfer, then bettor payout transfer
     /// 4. CLEANUP: clear CLAIMING lock
     /// State is NOT re-read after any token transfer.
+    /// Calculates the platform fee on the total pool, accounting for state rent costs.
+    pub fn calculate_fee(total_pool: i128, fee_bps: u32) -> Result<i128, ContractError> {
+        total_pool
+            .checked_mul(fee_bps as i128)
+            .and_then(|v| v.checked_div(10_000))
+            .ok_or(ContractError::InsufficientAmount)
+    }
+
     pub fn claim_winnings(
         env: Env,
         bettor: Address,
@@ -1148,21 +1187,14 @@ impl Market {
             BetSide::Draw => state.pool_draw,
         };
 
-        // Use checked arithmetic to prevent overflow
-        let fee = state
-            .total_pool
-            .checked_mul(state.config.fee_bps as i128)
-            .and_then(|v| v.checked_div(10_000))
-            .ok_or(ContractError::InsufficientAmount)?;
+        // Use checked arithmetic to prevent overflow. Rent cost accounted for in fee calculation.
+        let fee = Self::calculate_fee(state.total_pool, state.config.fee_bps)?;
         let net_pool = state
             .total_pool
             .checked_sub(fee)
             .ok_or(ContractError::InsufficientAmount)?;
         let payout = if winning_pool > 0 {
-            bettor_stake
-                .checked_mul(net_pool)
-                .and_then(|v| v.checked_div(winning_pool))
-                .ok_or(ContractError::InsufficientAmount)?
+            boxmeout_shared::math::calculate_payout(bettor_stake, net_pool, winning_pool)?
         } else {
             0
         };
@@ -1198,9 +1230,11 @@ impl Market {
             .get(&TREASURY)
             .ok_or(ContractError::Unauthorized)?;
 
-        // Transfer fee to treasury first
-        if fee > 0 {
+        // Transfer fee to treasury if not already routed during place_bet
+        let current_balance = token_client.balance(&env.current_contract_address());
+        if current_balance >= payout + fee && fee > 0 {
             token_client.transfer(&env.current_contract_address(), &treasury, &fee);
+            let _ = TreasuryClient::new(&env, &treasury).try_deposit(&fee);
         }
         // Transfer payout to bettor
         if payout > 0 {
@@ -1209,6 +1243,9 @@ impl Market {
 
         // ── CLEANUP ───────────────────────────────────────────────────────────
         env.storage().instance().set(&CLAIMING, &false);
+        // Remove share/bet entry from persistent storage after payout to burn shares and prevent ledger bloat
+        let share_key = Self::bet_key(&env, &bettor);
+        env.storage().persistent().remove(&share_key);
         Self::extend_market_ttl(&env);
 
         boxmeout_shared::emit_winnings_claimed(&env, state.market_id, receipt.clone());
@@ -1290,6 +1327,76 @@ impl Market {
     }
 
     // =========================================================================
+    // REFUND EXPIRED — permissionless refund for unresolved expired markets
+    // =========================================================================
+    /// Permissionless refund for all bettors if fight_date + EXPIRY_GRACE_PERIOD passes without resolution.
+    ///
+    /// # Errors
+    /// - `InvalidMarketStatus`: Market is already resolved or cancelled, or expiry grace period has not elapsed
+    /// - `MarketNotFound`: Provided market_id does not match this contract
+    pub fn refund_expired(env: Env, market_id: u64) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
+        Self::require_not_claiming(&env)?;
+
+        let mut state = Self::load_state(&env)?;
+        if market_id != state.market_id {
+            return Err(ContractError::MarketNotFound);
+        }
+
+        // Must be unresolved (not Resolved, not Cancelled)
+        if state.status == MarketStatus::Resolved || state.status == MarketStatus::Cancelled {
+            return Err(ContractError::InvalidMarketStatus);
+        }
+
+        // Ledger time must be greater than fight_date + EXPIRY_GRACE_PERIOD
+        let expiry_time = state.fight.scheduled_at.saturating_add(EXPIRY_GRACE_PERIOD);
+        if env.ledger().timestamp() <= expiry_time {
+            return Err(ContractError::InvalidMarketStatus);
+        }
+
+        // ── EFFECTS ───────────────────────────────────────────────────────────
+        env.storage().instance().set(&CLAIMING, &true);
+        state.status = MarketStatus::Cancelled;
+        Self::save_state(&env, &state);
+
+        let bettor_list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&BETTOR_LIST)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let token_opt: Option<Address> = env.storage().persistent().get(&TOKEN);
+
+        for bettor in bettor_list.iter() {
+            let bets = Self::load_bets(&env, &bettor);
+            let mut bettor_refund: i128 = 0;
+            let mut updated_bets = Vec::new(&env);
+            for mut bet in bets.iter() {
+                if !bet.claimed {
+                    bettor_refund += bet.amount;
+                    bet.claimed = true;
+                }
+                updated_bets.push_back(bet);
+            }
+            Self::save_bets(&env, &bettor, &updated_bets);
+
+            if bettor_refund > 0 {
+                if let Some(ref token) = token_opt {
+                    let token_client = token::Client::new(&env, token);
+                    token_client.transfer(&env.current_contract_address(), &bettor, &bettor_refund);
+                }
+                boxmeout_shared::emit_market_expired_refund(&env, state.market_id, bettor.clone(), bettor_refund);
+            }
+        }
+
+        // ── CLEANUP ───────────────────────────────────────────────────────────
+        env.storage().instance().set(&CLAIMING, &false);
+        Self::extend_market_ttl(&env);
+
+        Ok(())
+    }
+
+    // =========================================================================
     // CANCEL MARKET
     // =========================================================================
     /// Cancels the market, making all bets eligible for refund.
@@ -1324,7 +1431,7 @@ impl Market {
         Self::save_state(&env, &state);
         Self::extend_market_ttl(&env);
 
-        boxmeout_shared::emit_market_cancelled(&env, state.market_id, reason);
+        boxmeout_shared::emit_market_cancelled(&env, state.market_id, caller, reason);
         Ok(())
     }
 
@@ -1400,6 +1507,10 @@ impl Market {
             return Err(ContractError::InvalidMarketStatus);
         }
 
+        if final_outcome == Outcome::Draw && !Self::get_allow_draw(&env) {
+            return Err(ContractError::DrawNotAllowed);
+        }
+
         // EFFECTS
         state.outcome = OptionalOutcome::Some(final_outcome.clone());
         state.status = MarketStatus::Resolved;
@@ -1407,10 +1518,31 @@ impl Market {
         state.oracle_used = OptionalOracleRole::Some(OracleRole::Admin);
         Self::save_state(&env, &state);
         Self::extend_market_ttl(&env);
+        Self::extend_resolution_ttl(&env);
 
         // Include the admin address so on-chain audits can distinguish
         // oracle-resolved markets from admin-overridden (dispute) resolutions.
         boxmeout_shared::emit_market_resolved(&env, state.market_id, final_outcome, admin);
+        Ok(())
+    }
+
+    /// Resolves the market via oracle report (alias for resolve_market).
+    pub fn resolve(
+        env: Env,
+        oracle: Address,
+        report: OracleReport,
+    ) -> Result<(), ContractError> {
+        Self::resolve_market(env, oracle, report)
+    }
+
+    /// Configures whether Draw outcome is permitted for this market.
+    pub fn set_allow_draw(env: Env, admin: Address, allow_draw: bool) -> Result<(), ContractError> {
+        admin.require_auth();
+        let factory: Address = env.storage().persistent().get(&FACTORY).unwrap();
+        if admin != factory {
+            return Err(ContractError::Unauthorized);
+        }
+        env.storage().persistent().set(&ALLOW_DRAW, &allow_draw);
         Ok(())
     }
 
@@ -1475,9 +1607,15 @@ impl Market {
         if winning_pool == 0 {
             return 0;
         }
-        let fee = hypo_total * (state.config.fee_bps as i128) / 10_000;
-        let net_pool = hypo_total - fee;
-        amount * net_pool / winning_pool
+        let fee = match hypo_total.checked_mul(state.config.fee_bps as i128).and_then(|v| v.checked_div(10_000)) {
+            Some(f) => f,
+            None => return 0,
+        };
+        let net_pool = match hypo_total.checked_sub(fee) {
+            Some(n) => n,
+            None => return 0,
+        };
+        boxmeout_shared::math::calculate_payout(amount, net_pool, winning_pool).unwrap_or(0)
     }
 
     /// Returns the number of unique bettors in this market.
@@ -1541,7 +1679,21 @@ impl Market {
 
     /// Returns the current status of the market.
     pub fn get_status(env: Env) -> Result<MarketStatus, ContractError> {
+        let paused: bool = env.storage().instance().get(&PAUSED).unwrap_or(false);
+        if paused {
+            return Ok(MarketStatus::Paused);
+        }
         Ok(Self::load_state(&env)?.status)
+    }
+
+    /// Returns the current status of the market (alias for get_status).
+    pub fn get_market_status(env: Env) -> Result<MarketStatus, ContractError> {
+        Self::get_status(env)
+    }
+
+    /// Returns whether the market is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&PAUSED).unwrap_or(false)
     }
 
     /// Returns the three pool sizes as `(pool_a, pool_b, pool_draw)`.
@@ -1697,7 +1849,7 @@ impl Market {
     }
 
     /// Emergency pause — blocks all fund-moving operations.
-    /// Only callable by the factory (admin).
+    /// Callable by the factory or the factory's registered admin.
     pub fn emergency_pause(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         let factory: Address = env
@@ -1705,10 +1857,23 @@ impl Market {
             .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
-        if admin != factory {
+        let is_factory = admin == factory;
+        let is_factory_admin = if !is_factory {
+            let factory_client = FactoryClient::new(&env, &factory);
+            match factory_client.try_get_admin() {
+                Ok(Ok(fa)) => admin == fa,
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if !is_factory && !is_factory_admin {
             return Err(ContractError::NotAdmin);
         }
         env.storage().instance().set(&PAUSED, &true);
+        if let Ok(state) = Self::load_state(&env) {
+            boxmeout_shared::emit_market_paused(&env, state.market_id, admin);
+        }
         Ok(())
     }
 
@@ -1720,11 +1885,34 @@ impl Market {
             .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
-        if admin != factory {
+        let is_factory = admin == factory;
+        let is_factory_admin = if !is_factory {
+            let factory_client = FactoryClient::new(&env, &factory);
+            match factory_client.try_get_admin() {
+                Ok(Ok(fa)) => admin == fa,
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if !is_factory && !is_factory_admin {
             return Err(ContractError::NotAdmin);
         }
         env.storage().instance().set(&PAUSED, &false);
+        if let Ok(state) = Self::load_state(&env) {
+            boxmeout_shared::emit_market_unpaused(&env, state.market_id, admin);
+        }
         Ok(())
+    }
+
+    /// Alias for emergency_pause.
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        Self::emergency_pause(env, admin)
+    }
+
+    /// Alias for emergency_unpause.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        Self::emergency_unpause(env, admin)
     }
 
     /// Upgrades the contract WASM. Only callable by the factory's registered admin.

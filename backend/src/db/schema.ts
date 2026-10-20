@@ -56,6 +56,7 @@ export const bets = pgTable(
     side: text('side').notNull(),
     amount: numeric('amount').notNull(),
     amount_xlm: numeric('amount_xlm').default('0'),
+    odds_snapshot: jsonb('odds_snapshot'),
     placed_at: timestamp('placed_at', { withTimezone: true }).defaultNow(),
     claimed: boolean('claimed').default(false),
     claimed_at: timestamp('claimed_at', { withTimezone: true }),
@@ -132,6 +133,19 @@ export const oracle_reports = pgTable(
   }),
 );
 
+export const registered_oracles = pgTable(
+  'registered_oracles',
+  {
+    oracle_address: text('oracle_address').primaryKey(),
+    public_key: text('public_key').notNull(),
+    active: boolean('active').notNull().default(true),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    active_idx: index('registered_oracles_active_idx').on(table.active),
+  }),
+);
+
 export const notification_jobs = pgTable(
   'notification_jobs',
   {
@@ -182,6 +196,7 @@ export const users = pgTable(
     two_factor_secret: text('two_factor_secret'), // AES-GCM encrypted
     role: text('role').default('user'), // 'user' | 'admin'
     session_version: integer('session_version').default(0),
+    password_version: integer('password_version').default(0),
     created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
     updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
   },
@@ -394,6 +409,25 @@ export const user_notifications = pgTable(
   }),
 );
 
+export const refresh_token_issuances = pgTable(
+  'refresh_token_issuances',
+  {
+    id: serial('id').primaryKey(),
+    user_id: text('user_id').notNull().references(() => users.id),
+    token_hash: text('token_hash').notNull().unique(),
+    issued_at: timestamp('issued_at', { withTimezone: true }).notNull(),
+    expires_at: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revoked_at: timestamp('revoked_at', { withTimezone: true }),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    user_id_idx: index('refresh_token_issuances_user_id_idx').on(table.user_id),
+    token_hash_idx: index('refresh_token_issuances_token_hash_idx').on(table.token_hash),
+    issued_at_idx: index('refresh_token_issuances_issued_at_idx').on(table.issued_at),
+    user_revoked_idx: index('refresh_token_issuances_user_revoked_idx').on(table.user_id, table.revoked_at),
+  }),
+);
+
 export type Market = typeof markets.$inferSelect;
 export type NewMarket = typeof markets.$inferInsert;
 export type Bet = typeof bets.$inferSelect;
@@ -512,3 +546,5 @@ export type ReferralPayout = typeof referral_payouts.$inferSelect;
 export type NewReferralPayout = typeof referral_payouts.$inferInsert;
 export type UserNotification = typeof user_notifications.$inferSelect;
 export type NewUserNotification = typeof user_notifications.$inferInsert;
+export type RefreshTokenIssuance = typeof refresh_token_issuances.$inferSelect;
+export type NewRefreshTokenIssuance = typeof refresh_token_issuances.$inferInsert;

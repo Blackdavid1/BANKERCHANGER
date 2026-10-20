@@ -22,6 +22,8 @@ pub enum ContractError {
     UnregisteredMarket = 6,
     /// Pending admin transfer proposal has expired
     PendingAdminExpired = 7,
+    /// Admin timelock is active; proposal cannot be accepted yet
+    AdminTimelockActive = 8,
 
     // ── Market State ───────────────────────────────────────
     /// Requested market ID does not exist
@@ -44,13 +46,15 @@ pub enum ContractError {
     BettingClosed = 18,
     /// Bet amount exceeds maximum allowed
     BetTooLarge = 19,
+    /// Market is paused
+    MarketPaused = 48,
 
     // ── Bet Validation ─────────────────────────────────────
     /// Bet amount is below minimum allowed
     BetTooLow = 20,
     /// Transfer amount is insufficient for the requested operation
     InsufficientAmount = 21,
-    /// Bettor has already placed a bet in this market
+    /// Legacy error code retained for compatibility; multiple bets are now allowed
     AlreadyBet = 22,
     /// Bettor has already claimed winnings or refund
     AlreadyClaimed = 23,
@@ -62,6 +66,8 @@ pub enum ContractError {
     BelowMinimum = 26,
     /// Amount must be positive and non-zero
     InvalidAmount = 27,
+    /// Bet would exceed the bettor's configured share of the market pool
+    BetLimitExceeded = 28,
 
     // ── Oracle / Resolution ────────────────────────────────
     /// Oracle signature verification failed
@@ -76,6 +82,8 @@ pub enum ContractError {
     DisputeCooldownActive = 34,
     /// finalize_resolution called on a market not in ResolutionPending state
     ResolutionNotPending = 35,
+    /// Market was not configured to allow Draw outcome
+    DrawNotAllowed = 36,
 
     // ── Treasury ───────────────────────────────────────────
     /// Fee withdrawals are temporarily paused
@@ -98,9 +106,9 @@ pub enum ContractError {
     OracleAlreadyWhitelisted = 51,
     /// Too many markets were requested in one query
     TooManyMarkets = 52,
-    /// WASM hash for market contract has not been set by admin
+    /// Market wasm hash has not been configured yet
     WasmHashNotSet = 53,
-    /// Oracle address is not whitelisted
+    /// Oracle address is not on the factory whitelist
     OracleNotWhitelisted = 54,
 
     // ── Reentrancy ─────────────────────────────────────────
@@ -110,4 +118,12 @@ pub enum ContractError {
     // ── Slippage ────────────────────────────────────────────
     /// Computed shares out are below the caller's min_shares_out tolerance
     SlippageExceeded = 61,
+
+    // ── Reserve ────────────────────────────────────────────
+    /// Withdrawal would bring the treasury balance below the configured minimum reserve
+    InsufficientReserve = 62,
+
+    // ── Arithmetic ─────────────────────────────────────────
+    /// Arithmetic operation resulted in overflow
+    ArithmeticOverflow = 70,
 }

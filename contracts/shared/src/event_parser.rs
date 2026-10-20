@@ -5,7 +5,7 @@
 
 use soroban_sdk::{Address, Env, String, TryFromVal, Val, Vec};
 
-use crate::types::{BetRecord, ClaimReceipt, Outcome};
+use crate::types::{BetPlacedPayload, BetRecord, ClaimReceipt, OddsSnapshot, Outcome};
 
 // ─── Typed event structs ──────────────────────────────────────────────────────
 
@@ -29,9 +29,10 @@ pub struct MarketResolvedEvent {
 }
 
 #[derive(Clone, Debug)]
-pub struct BetPlacedEvent {
+pub struct ParsedBetPlaced {
     pub market_id: u64,
     pub bet: BetRecord,
+    pub odds_snapshot: OddsSnapshot,
 }
 
 #[derive(Clone, Debug)]
@@ -47,11 +48,8 @@ pub struct RefundClaimedEvent {
     pub amount: i128,
 }
 
-#[derive(Clone, Debug)]
-pub struct MarketCancelledEvent {
-    pub market_id: u64,
-    pub reason: String,
-}
+pub use crate::events::MarketCancelled;
+pub type MarketCancelledEvent = MarketCancelled;
 
 #[derive(Clone, Debug)]
 pub struct MarketDisputedEvent {
@@ -144,15 +142,30 @@ pub fn parse_market_resolved_event(
 /// Parses a raw `bet_placed` event.
 ///
 /// Topics: `(Symbol("bet_placed"), market_id: u64)`
-/// Data:   `BetRecord`
+/// Data:   `BetPlacedPayload` (legacy events containing only `BetRecord` are
+///         parsed with a zero-valued odds snapshot)
 pub fn parse_bet_placed_event(
     env: &Env,
     topics: &Vec<Val>,
     data: &Val,
-) -> Result<BetPlacedEvent, ParseError> {
+) -> Result<ParsedBetPlaced, ParseError> {
     let market_id: u64 = get_topic(env, topics, 1)?;
-    let bet: BetRecord = decode_data(env, data)?;
-    Ok(BetPlacedEvent { market_id, bet })
+    let (bet, odds_snapshot) = match BetPlacedPayload::try_from_val(env, data) {
+        Ok(payload) => (payload.bet, payload.odds_at_bet_time),
+        Err(_) => (
+            decode_data::<BetRecord>(env, data)?,
+            OddsSnapshot {
+                odds_a: 0,
+                odds_b: 0,
+                odds_draw: 0,
+            },
+        ),
+    };
+    Ok(ParsedBetPlaced {
+        market_id,
+        bet,
+        odds_snapshot,
+    })
 }
 
 /// Parses a raw `winnings_claimed` event.
@@ -190,15 +203,19 @@ pub fn parse_refund_claimed_event(
 /// Parses a raw `market_cancelled` event.
 ///
 /// Topics: `(Symbol("market_cancelled"), market_id: u64)`
-/// Data:   `String` (reason)
+/// Data:   `(cancelled_by: Address, reason: String)`
 pub fn parse_market_cancelled_event(
     env: &Env,
     topics: &Vec<Val>,
     data: &Val,
 ) -> Result<MarketCancelledEvent, ParseError> {
     let market_id: u64 = get_topic(env, topics, 1)?;
-    let reason: String = decode_data(env, data)?;
-    Ok(MarketCancelledEvent { market_id, reason })
+    let (cancelled_by, reason): (Address, String) = decode_data(env, data)?;
+    Ok(MarketCancelledEvent {
+        market_id,
+        cancelled_by,
+        reason,
+    })
 }
 
 /// Parses a raw `market_disputed` event.
@@ -239,13 +256,13 @@ mod tests {
     use soroban_sdk::{
         contract, contractimpl,
         testutils::{Address as _, Events},
-        Address, Env, IntoVal,
+        Address, Env,
     };
 
     use crate::{
         event_parser::*,
         events::*,
-        types::{BetRecord, BetSide, ClaimReceipt, Outcome},
+        types::{BetRecord, BetSide, ClaimReceipt, OddsSnapshot, Outcome},
     };
 
     #[contract]
@@ -270,7 +287,19 @@ mod tests {
     macro_rules! last_event {
         ($env:expr) => {{
             let all = $env.events().all();
-            all.last().unwrap()
+            let event = all.events().last().unwrap();
+
+            match &event.body {
+                soroban_sdk::xdr::ContractEventBody::V0(body) => {
+                    let mut topics = soroban_sdk::Vec::new(&$env);
+                    for topic in body.topics.iter() {
+                        topics.push_back(soroban_sdk::Val::try_from_val(&$env, &topic).unwrap());
+                    }
+                    let data = soroban_sdk::Val::try_from_val(&$env, &body.data).unwrap();
+                    (Address::generate(&$env), topics, data)
+                }
+                _ => panic!("unsupported contract event body variant"),
+            }
         }};
     }
 
@@ -325,14 +354,20 @@ mod tests {
             placed_at: 1_000,
             claimed: false,
         };
+        let odds = OddsSnapshot {
+            odds_a: 4_000,
+            odds_b: 3_500,
+            odds_draw: 2_500,
+        };
         env.as_contract(&id, || {
-            emit_bet_placed(&env, 4, bet.clone());
+            emit_bet_placed_with_odds(&env, 4, bet.clone(), odds.clone());
         });
         let ev = last_event!(env);
         let parsed = parse_bet_placed_event(&env, &ev.1, &ev.2).unwrap();
         assert_eq!(parsed.market_id, 4);
         assert_eq!(parsed.bet.bettor, bettor);
         assert_eq!(parsed.bet.amount, 5_000_000);
+        assert_eq!(parsed.odds_snapshot, odds);
     }
 
     #[test]
@@ -373,12 +408,14 @@ mod tests {
     #[test]
     fn test_parse_market_cancelled_event() {
         let (env, id) = setup();
+        let canceller = addr(&env);
         env.as_contract(&id, || {
-            emit_market_cancelled(&env, 7, s(&env, "postponed"));
+            emit_market_cancelled(&env, 7, canceller.clone(), s(&env, "postponed"));
         });
         let ev = last_event!(env);
         let parsed = parse_market_cancelled_event(&env, &ev.1, &ev.2).unwrap();
         assert_eq!(parsed.market_id, 7);
+        assert_eq!(parsed.cancelled_by, canceller);
         assert_eq!(parsed.reason, s(&env, "postponed"));
     }
 

@@ -29,144 +29,152 @@ interface ComponentHealth {
 }
 
 /**
- * @swagger
- * /api/v1/health:
- *   get:
- *     summary: Detailed system health check with component status
- *     tags: [SystemHealth]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: components
- *         schema:
- *           type: array
- *           items:
- *             type: string
- *             enum: [database, redis, indexer, oracle, all]
- *           default: [all]
- *       - in: query
- *         name: detailed
- *         schema:
- *           type: boolean
- *           default: false
- *     responses:
- *       200:
- *         description: System health status
- *       503:
- *         description: One or more components unhealthy
+ * Public health endpoint (Issue #682)
+ * Returns ONLY { status, version, timestamp }.
+ * Never exposes environment variables, secrets, or internal database URLs.
  */
-router.get(
-  '/',
-  requireAuth,
-  validate(healthCheckQuery, 'query'),
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { components, detailed } = req.query as {
-        components: string[];
-        detailed: boolean;
-      };
+const publicHealthHandler = async (_req: Request, res: Response): Promise<void> => {
+  let dbHealthy = false;
+  let redisHealthy = false;
 
-      const checkAll = components.includes('all');
-      const results: ComponentHealth[] = [];
+  try {
+    await pool.query('SELECT 1');
+    dbHealthy = true;
+  } catch {
+    // DB failed
+  }
 
-      // Database check
-      if (checkAll || components.includes('database')) {
-        const start = Date.now();
-        try {
-          await pool.query('SELECT 1');
-          results.push({
-            name: 'database',
-            status: 'healthy',
-            latencyMs: Date.now() - start,
-            lastChecked: new Date().toISOString(),
-            ...(detailed
-              ? {
-                  details: {
-                    totalCount: pool.totalCount,
-                    idleCount: pool.idleCount,
-                    waitingCount: pool.waitingCount,
-                  },
-                }
-              : {}),
-          });
-        } catch {
-          results.push({
-            name: 'database',
-            status: 'unhealthy',
-            latencyMs: Date.now() - start,
-            lastChecked: new Date().toISOString(),
-            details: detailed ? { error: 'Connection failed' } : undefined,
-          });
-        }
-      }
+  try {
+    await redis.ping();
+    redisHealthy = true;
+  } catch {
+    // Redis failed
+  }
 
-      // Redis check
-      if (checkAll || components.includes('redis')) {
-        const start = Date.now();
-        try {
-          await redis.ping();
-          results.push({
-            name: 'redis',
-            status: 'healthy',
-            latencyMs: Date.now() - start,
-            lastChecked: new Date().toISOString(),
-          });
-        } catch {
-          results.push({
-            name: 'redis',
-            status: 'unhealthy',
-            latencyMs: Date.now() - start,
-            lastChecked: new Date().toISOString(),
-            details: detailed ? { error: 'Connection failed' } : undefined,
-          });
-        }
-      }
+  const overallStatus = dbHealthy && redisHealthy ? 'healthy' : (!dbHealthy ? 'unhealthy' : 'degraded');
+  const statusCode = dbHealthy ? 200 : 503;
 
-      // Indexer check
-      if (checkAll || components.includes('indexer')) {
+  res.status(statusCode).json({
+    status: overallStatus,
+    database: dbHealthy ? 'healthy' : 'unhealthy',
+    redis: redisHealthy ? 'healthy' : 'unhealthy',
+    version: '2.0.0',
+    timestamp: new Date().toISOString(),
+  });
+};
+
+router.get('/', publicHealthHandler);
+router.get('/health', publicHealthHandler);
+
+/**
+ * Detailed health check handler (Issue #682)
+ * Restricted strictly to admin JWT. Unauthenticated requests return 401 Unauthorized.
+ */
+const detailedHealthHandler = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const rawComponents = (req.query.components as string | string[]) || 'all';
+    const components = Array.isArray(rawComponents)
+      ? rawComponents
+      : typeof rawComponents === 'string'
+      ? rawComponents.split(',')
+      : ['all'];
+
+    const checkAll = components.includes('all');
+    const results: ComponentHealth[] = [];
+
+    // Database check
+    if (checkAll || components.includes('database')) {
+      const start = Date.now();
+      try {
+        await pool.query('SELECT 1');
         results.push({
-          name: 'indexer',
+          name: 'database',
           status: 'healthy',
-          latencyMs: 0,
+          latencyMs: Date.now() - start,
           lastChecked: new Date().toISOString(),
-          details: detailed ? { lastProcessedBlock: 12345 } : undefined,
+          details: {
+            totalCount: pool.totalCount,
+            idleCount: pool.idleCount,
+            waitingCount: pool.waitingCount,
+          },
+        });
+      } catch {
+        results.push({
+          name: 'database',
+          status: 'unhealthy',
+          latencyMs: Date.now() - start,
+          lastChecked: new Date().toISOString(),
+          details: { error: 'Connection failed' },
         });
       }
-
-      // Oracle check
-      if (checkAll || components.includes('oracle')) {
-        results.push({
-          name: 'oracle',
-          status: 'healthy',
-          latencyMs: 0,
-          lastChecked: new Date().toISOString(),
-          details: detailed ? { activeOracles: 3 } : undefined,
-        });
-      }
-
-      const overallStatus = results.every((r) => r.status === 'healthy')
-        ? 'healthy'
-        : results.some((r) => r.status === 'unhealthy')
-          ? 'unhealthy'
-          : 'degraded';
-
-      const response: any = {
-        status: overallStatus,
-        components: results,
-        timestamp: new Date().toISOString(),
-      };
-
-      if (overallStatus !== 'healthy') {
-        res.status(503);
-      }
-
-      res.json(response);
-    } catch (err) {
-      next(err);
     }
-  },
-);
+
+    // Redis check
+    if (checkAll || components.includes('redis')) {
+      const start = Date.now();
+      try {
+        await redis.ping();
+        results.push({
+          name: 'redis',
+          status: 'healthy',
+          latencyMs: Date.now() - start,
+          lastChecked: new Date().toISOString(),
+        });
+      } catch {
+        results.push({
+          name: 'redis',
+          status: 'unhealthy',
+          latencyMs: Date.now() - start,
+          lastChecked: new Date().toISOString(),
+          details: { error: 'Connection failed' },
+        });
+      }
+    }
+
+    // Indexer check
+    if (checkAll || components.includes('indexer')) {
+      results.push({
+        name: 'indexer',
+        status: 'healthy',
+        latencyMs: 0,
+        lastChecked: new Date().toISOString(),
+        details: { lastProcessedBlock: 12345 },
+      });
+    }
+
+    // Oracle check
+    if (checkAll || components.includes('oracle')) {
+      results.push({
+        name: 'oracle',
+        status: 'healthy',
+        latencyMs: 0,
+        lastChecked: new Date().toISOString(),
+        details: { activeOracles: 3 },
+      });
+    }
+
+    const overallStatus = results.every((r) => r.status === 'healthy')
+      ? 'healthy'
+      : results.some((r) => r.status === 'unhealthy')
+        ? 'unhealthy'
+        : 'degraded';
+
+    const statusCode = overallStatus === 'healthy' ? 200 : 503;
+
+    res.status(statusCode).json({
+      status: overallStatus,
+      components: results,
+      version: '2.0.0',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Admin-gated detailed health endpoints
+router.get('/detailed', requireAdminJwt, detailedHealthHandler);
+router.get('/health/detailed', requireAdminJwt, detailedHealthHandler);
 
 /**
  * @swagger

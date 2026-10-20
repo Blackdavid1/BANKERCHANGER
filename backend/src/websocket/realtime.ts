@@ -3,11 +3,11 @@ import type { IncomingMessage, Server } from 'http';
 import jwt from 'jsonwebtoken';
 import { logger } from '../utils/logger';
 import type { RankUpdate } from '../models/Engagement';
+import { toMarketEventDTO } from '../dto/market.dto';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const JWT_SECRET = process.env.JWT_ACCESS_SECRET ?? process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
 const AUTH_TIMEOUT_MS = 5_000; // 5 seconds to send auth message
 
 // ---------------------------------------------------------------------------
@@ -42,12 +42,21 @@ const WINDOW_MS = 1_000;
 export type ActivityEvent =
   | { type: 'trade'; marketId: string; outcomeId: string; side: string; sharesAmount: number; priceBps: number; timestamp: string }
   | { type: 'dispute'; marketId: string; proposedOutcomeId: string }
+  | { type: 'market:resolved'; marketId: string; outcome: string; winner_odds: number; timestamp: string }
   | { type: 'resolved'; marketId: string; winningOutcomeId: string }
   | { type: 'cancelled'; marketId: string }
   | { type: 'market_update'; marketId: string; eventType: string; data: Record<string, unknown> }
   | { type: 'leaderboard_rank_update'; userId: string; rank: number; currentStreak?: number; timestamp: string }
   | { type: 'leaderboard_rank'; marketId: string; address: string; rank: number | null; score: number; timestamp: string }
+  | { type: 'bet_count_update'; marketId: string; betCount: number; timestamp: string }
   | { type: 'indexer_status'; status: 'running' | 'idle' | 'error' | 'syncing'; currentLedger: number; targetLedger: number; timestamp: string };
+
+export type MarketCreatedEvent = {
+  type: 'market:created';
+  marketId: string;
+  fighterA: string;
+  fighterB: string;
+};
 
 /** Pushed to leaderboard subscribers whenever one or more ranks change. */
 export interface LeaderboardRankEvent {
@@ -70,6 +79,7 @@ export type LeaderboardRankUpdateEvent = {
 type AuthMsg = { type: 'auth'; token: string };
 type SubscribeMsg =
   | { type: 'subscribe_activity'; marketId: string }
+  | { type: 'subscribe_market_created' }
   | { type: 'subscribe_leaderboard'; leaderboardId?: string }
   | { type: 'unsubscribe_leaderboard'; leaderboardId?: string };
 
@@ -134,10 +144,11 @@ export class ActivityFeed {
   private leaderboardSubscriptions = new Map<string, Set<WebSocket>>();
   // global leaderboard subscriptions
   private globalLeaderboardSubs = new Set<WebSocket>();
+  private globalMarketCreatedSubs = new Set<WebSocket>();
   private rateLimiter = new MarketRateLimiter();
   private clientRateLimiter = new ClientRateLimiter();
   // Track authenticated connections
-  private authenticated = new WeakSet<WebSocket>();
+  private authScopes = new WeakMap<WebSocket, 'full' | 'activity'>();
   // Track auth timeout timers per socket
   private authTimeouts = new WeakMap<WebSocket, NodeJS.Timeout>();
 
@@ -246,12 +257,21 @@ export class ActivityFeed {
     }
   }
 
-  private verifyToken(token: string): boolean {
+  private verifyToken(token: string): 'full' | 'activity' | null {
+    const jwtSecret = process.env.JWT_ACCESS_SECRET ?? process.env.JWT_SECRET;
+    if (!jwtSecret) return null;
+
     try {
-      jwt.verify(token, JWT_SECRET);
-      return true;
+      const payload = jwt.verify(token, jwtSecret) as jwt.JwtPayload;
+      if (payload.type === 'access') return 'full';
+      if (
+        payload.sub === 'public-market-feed' &&
+        payload.type === 'ws_activity' &&
+        payload.scope === 'market_activity:read'
+      ) return 'activity';
+      return null;
     } catch {
-      return false;
+      return null;
     }
   }
 
@@ -268,19 +288,20 @@ export class ActivityFeed {
       return;
     }
 
-    if (!this.authenticated.has(ws)) {
+    if (!this.authScopes.has(ws)) {
       const authMsg = msg as AuthMsg;
       if (authMsg.type !== 'auth' || typeof authMsg.token !== 'string') {
         ws.close(4001, 'Expected auth message');
         return;
       }
 
-      if (!this.verifyToken(authMsg.token)) {
+      const scope = this.verifyToken(authMsg.token);
+      if (!scope) {
         ws.close(4001, 'Invalid token');
         return;
       }
 
-      this.authenticated.add(ws);
+      this.authScopes.set(ws, scope);
       const timeout = this.authTimeouts.get(ws);
       if (timeout) {
         clearTimeout(timeout);
@@ -309,7 +330,17 @@ export class ActivityFeed {
       return;
     }
 
+    if (msg.type === 'subscribe_market_created') {
+      this.globalMarketCreatedSubs.add(ws);
+      return;
+    }
+
     if (msg.type === 'subscribe_leaderboard') {
+      if (this.authScopes.get(ws) !== 'full') {
+        ws.send(JSON.stringify({ type: 'error', code: 403, message: 'INSUFFICIENT_SCOPE' }));
+        return;
+      }
+
       // Deduplicate global leaderboard subscription
       if (!this.subscribedGlobalLeaderboard.has(ws)) {
         this.subscribedGlobalLeaderboard.add(ws);
@@ -334,6 +365,8 @@ export class ActivityFeed {
     }
 
     if (msg.type === 'unsubscribe_leaderboard') {
+      if (this.authScopes.get(ws) !== 'full') return;
+
       this.globalLeaderboardSubs.delete(ws);
       // Allow re-subscribe after unsubscribe
       // (we can't delete from a WeakSet, but the subscription set is the source of truth)
@@ -366,6 +399,7 @@ export class ActivityFeed {
 
     // ── Market subscriptions ──────────────────────────────────────────────
     this.globalLeaderboardSubs.delete(ws);
+    this.globalMarketCreatedSubs.delete(ws);
 
     for (const [marketId, sockets] of this.subscriptions.entries()) {
       sockets.delete(ws);
@@ -384,16 +418,18 @@ export class ActivityFeed {
     logger.debug({ connectedClients: this.connectedClients }, 'WebSocket client disconnected');
   }
 
-  /** Publish an activity event to subscribers. */
-  publish(event: ActivityEvent | LeaderboardRankUpdateEvent): void {
-    if ('marketId' in event && event.marketId) {
-      const marketId = event.marketId;
-      if (!this.rateLimiter.allow(marketId)) return;
+  /** Publish an activity event to all subscribers of the market. */
+  publish(event: ActivityEvent): void {
+    const { marketId } = event as { marketId: string };
+    if (event.type !== 'market:resolved' && !this.rateLimiter.allow(marketId)) return;
 
       const sockets = this.subscriptions.get(marketId);
       if (!sockets?.size) return;
 
-      const payload = JSON.stringify(event);
+      // Apply DTO whitelist projection to prevent private fields (user_id,
+      // wallet_address, etc.) from leaking into market-room broadcasts (#659).
+      const safeEvent = toMarketEventDTO(event as ActivityEvent);
+      const payload = JSON.stringify(safeEvent);
       for (const ws of sockets) {
         if (ws.readyState === WebSocket.OPEN) ws.send(payload);
       }
@@ -417,6 +453,24 @@ export class ActivityFeed {
         if (ws.readyState === WebSocket.OPEN) ws.send(payload);
       }
     }
+  }
+
+  publishMarketCreated(event: MarketCreatedEvent): void {
+    const payload = JSON.stringify(event);
+    for (const ws of this.globalMarketCreatedSubs) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    }
+  }
+
+  /** Publish a bet count update to market subscribers. */
+  publishBetCountUpdate(marketId: string, betCount: number): void {
+    const event = {
+      type: 'bet_count_update' as const,
+      marketId,
+      betCount,
+      timestamp: new Date().toISOString(),
+    };
+    this.publish(event);
   }
 
   publishLeaderboardUpdate(event: LeaderboardRankUpdateEvent | { userId: string; rank: number; currentStreak: number }): void {
@@ -474,6 +528,7 @@ export class ActivityFeed {
       dist[`leaderboard:${leaderboardId}`] = sockets.size;
     }
     dist['leaderboard:global'] = this.globalLeaderboardSubs.size;
+    dist['market:created'] = this.globalMarketCreatedSubs.size;
     return dist;
   }
 }
@@ -491,10 +546,16 @@ export function getActivityFeed(): ActivityFeed {
   return _feed;
 }
 
-export function tryGetActivityFeed(): ActivityFeed | null {
-  return _feed;
-}
-
-export function getActivityFeedIfInitialized(): ActivityFeed | null {
-  return _feed;
+export function broadcastMarketResolved(
+  marketId: string,
+  outcome: string,
+  winner_odds: number,
+): void {
+  _feed?.publish({
+    type: 'market:resolved',
+    marketId,
+    outcome,
+    winner_odds,
+    timestamp: new Date().toISOString(),
+  });
 }

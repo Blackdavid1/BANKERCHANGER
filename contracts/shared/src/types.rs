@@ -6,6 +6,33 @@
 
 use soroban_sdk::{contracttype, Address, BytesN, String};
 
+// ─── Valid Market Categories (Weight Classes) ─────────────────────────────────
+//
+// These are the only values accepted by `create_market` for `fight.weight_class`.
+// Any other value will cause the call to return `ContractError::InvalidCategory`.
+//
+// Off-chain tools (indexer, frontend) rely on this fixed set to display
+// category filters correctly. Storing an arbitrary string in contract storage
+// would cause data inconsistency and break off-chain assumptions.
+
+pub const CATEGORY_HEAVYWEIGHT: &str        = "Heavyweight";
+pub const CATEGORY_CRUISERWEIGHT: &str      = "Cruiserweight";
+pub const CATEGORY_LIGHT_HEAVYWEIGHT: &str  = "Light Heavyweight";
+pub const CATEGORY_SUPER_MIDDLEWEIGHT: &str = "Super Middleweight";
+pub const CATEGORY_MIDDLEWEIGHT: &str       = "Middleweight";
+pub const CATEGORY_SUPER_WELTERWEIGHT: &str = "Super Welterweight";
+pub const CATEGORY_WELTERWEIGHT: &str       = "Welterweight";
+pub const CATEGORY_SUPER_LIGHTWEIGHT: &str  = "Super Lightweight";
+pub const CATEGORY_LIGHTWEIGHT: &str        = "Lightweight";
+pub const CATEGORY_SUPER_FEATHERWEIGHT: &str = "Super Featherweight";
+pub const CATEGORY_FEATHERWEIGHT: &str      = "Featherweight";
+pub const CATEGORY_SUPER_BANTAMWEIGHT: &str = "Super Bantamweight";
+pub const CATEGORY_BANTAMWEIGHT: &str       = "Bantamweight";
+pub const CATEGORY_SUPER_FLYWEIGHT: &str    = "Super Flyweight";
+pub const CATEGORY_FLYWEIGHT: &str          = "Flyweight";
+pub const CATEGORY_LIGHT_FLYWEIGHT: &str    = "Light Flyweight";
+pub const CATEGORY_MINIMUMWEIGHT: &str      = "Minimumweight";
+
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -17,6 +44,7 @@ pub enum MarketStatus {
     Resolved,          // Winner declared; claims are open (cooldown elapsed)
     Cancelled,         // Fight cancelled; full refunds available
     Disputed,          // Outcome under admin review; claims frozen
+    Paused,            // Market paused by admin
 }
 
 /// Market tier classification for the AMM & Odds Calculation Pipeline.
@@ -100,6 +128,9 @@ pub struct FightDetails {
 pub struct MarketConfig {
     /// Minimum bet in stroops (1 XLM = 10_000_000 stroops)
     pub min_bet_amount: i128,
+    /// Maximum share of the total market pool per bettor, in basis points
+    /// (2_000 = 20%; valid range: 1..=10_000).
+    pub max_bet_share_bps: u32,
     /// Maximum single bet in stroops
     pub max_bet: i128,
     /// Platform fee in basis points (200 = 2%)
@@ -161,6 +192,23 @@ pub struct BetRecord {
     pub placed_at: u64,
     /// True once winnings or refund have been claimed
     pub claimed: bool,
+}
+
+/// Outcome probabilities captured in basis points when a bet is placed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OddsSnapshot {
+    pub odds_a: u32,
+    pub odds_b: u32,
+    pub odds_draw: u32,
+}
+
+/// BetPlaced event payload including the odds offered before the stake is added.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BetPlacedPayload {
+    pub bet: BetRecord,
+    pub odds_at_bet_time: OddsSnapshot,
 }
 
 /// Optional outcome — used in MarketState to avoid Option<EnumType> which
@@ -316,6 +364,22 @@ pub struct FeeTier {
     pub volume_threshold: u64,
     /// Platform fee in basis points (e.g. 200 = 2.00%, 150 = 1.50%, 100 = 1.00%).
     pub fee_bps: u32,
+}
+
+/// LP position held by a liquidity provider in a market pool.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiquidityPosition {
+    /// Provider's Stellar address
+    pub provider: Address,
+    /// Market ID this position is for
+    pub market_id: u64,
+    /// Number of LP shares held
+    pub lp_shares: i128,
+    /// Fee-per-share accumulator snapshot at entry (for fee calculation)
+    pub fee_debt: i128,
+    /// Timestamp when the position was opened
+    pub entered_at: u64,
 }
 
 

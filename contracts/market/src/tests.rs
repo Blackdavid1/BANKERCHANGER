@@ -43,6 +43,7 @@ mod security_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -97,8 +98,11 @@ mod security_tests {
         // into claim_winnings while a token transfer is in flight.
         use boxmeout_shared::errors::ContractError;
         let env = Env::default();
-        env.storage().instance().set(&"CLAIMING", &true);
-        let claiming: bool = env.storage().instance().get(&"CLAIMING").unwrap_or(false);
+        let contract_id = env.register_contract(None, crate::Market);
+        let claiming = env.as_contract(&contract_id, || {
+            env.storage().instance().set(&"CLAIMING", &true);
+            env.storage().instance().get(&"CLAIMING").unwrap_or(false)
+        });
         let result: Result<(), ContractError> = if claiming {
             Err(ContractError::ReentrancyGuard)
         } else {
@@ -112,8 +116,11 @@ mod security_tests {
     fn test_reentrancy_guard_allows_after_reset() {
         use boxmeout_shared::errors::ContractError;
         let env = Env::default();
-        env.storage().instance().set(&"CLAIMING", &false);
-        let claiming: bool = env.storage().instance().get(&"CLAIMING").unwrap_or(false);
+        let contract_id = env.register_contract(None, crate::Market);
+        let claiming = env.as_contract(&contract_id, || {
+            env.storage().instance().set(&"CLAIMING", &false);
+            env.storage().instance().get(&"CLAIMING").unwrap_or(false)
+        });
         let result: Result<(), ContractError> = if claiming {
             Err(ContractError::ReentrancyGuard)
         } else {
@@ -431,6 +438,7 @@ mod place_bet_edge_cases {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -446,7 +454,7 @@ mod place_bet_edge_cases {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -805,6 +813,7 @@ mod full_market_lifecycle {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -830,7 +839,7 @@ mod full_market_lifecycle {
         // Set initial ledger time
         env.ledger().set(LedgerInfo {
             timestamp: 1000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -882,7 +891,7 @@ mod full_market_lifecycle {
         // Simulate market lock
         env.ledger().set(LedgerInfo {
             timestamp: lock_threshold + 1,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 101,
             network_id: Default::default(),
             base_reserve: 1,
@@ -988,6 +997,7 @@ mod resolve_dispute_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -999,7 +1009,7 @@ mod resolve_dispute_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1080,12 +1090,18 @@ mod resolve_dispute_tests {
         client.resolve_dispute(&factory, &Outcome::FighterA);
 
         let events = env.events().all();
-        let last = events.last().unwrap();
+        let last = events.events().last().unwrap();
+        let body = match &last.body {
+            soroban_sdk::xdr::ContractEventBody::V0(body) => body,
+            _ => panic!("unsupported event body variant"),
+        };
+        let topic_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.topics.get(0).unwrap().clone()).unwrap();
         let topic_sym: Symbol =
-            soroban_sdk::TryFromVal::try_from_val(&env, &last.1.get(0).unwrap()).unwrap();
-        assert_eq!(topic_sym, Symbol::new(&env, "market_resolved"));
+            soroban_sdk::TryFromVal::try_from_val(&env, &topic_val).unwrap();
+        assert_eq!(topic_sym, Symbol::new(&env, "dispute_resolved"));
+        let market_id_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.topics.get(1).unwrap().clone()).unwrap();
         let market_id: u64 =
-            soroban_sdk::TryFromVal::try_from_val(&env, &last.1.get(1).unwrap()).unwrap();
+            soroban_sdk::TryFromVal::try_from_val(&env, &market_id_val).unwrap();
         assert_eq!(market_id, 1u64);
     }
 
@@ -1096,7 +1112,7 @@ mod resolve_dispute_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1176,6 +1192,7 @@ mod get_current_odds_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -1192,7 +1209,7 @@ mod get_current_odds_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1321,6 +1338,7 @@ mod estimate_payout_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -1337,7 +1355,7 @@ mod estimate_payout_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1506,6 +1524,7 @@ mod oracle_sig_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -1517,7 +1536,7 @@ mod oracle_sig_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 50_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1653,7 +1672,7 @@ mod oracle_sig_tests {
         // Advance time past resolution_window (scheduled_at=100_000 + window=86400 = 186_400)
         env.ledger().set(LedgerInfo {
             timestamp: 200_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 200,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1813,6 +1832,7 @@ mod claim_routing_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -1824,7 +1844,7 @@ mod claim_routing_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 50_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -2182,6 +2202,7 @@ mod bet_timing_lock_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: LOCK_BEFORE_SECS,
             resolution_window: 86_400,
@@ -2197,7 +2218,7 @@ mod bet_timing_lock_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -2234,6 +2255,86 @@ mod bet_timing_lock_tests {
             &0i128,
         );
         assert!(result.is_ok(), "Bet before lock threshold must succeed");
+    }
+
+    /// A bettor may split their stake across bets, up to the cumulative market cap.
+    #[test]
+    fn test_bettor_cannot_exceed_configured_pool_share_cap() {
+        use boxmeout_shared::errors::ContractError;
+
+        let lock_threshold = SCHEDULED_AT - LOCK_BEFORE_SECS;
+        let env = Env::default();
+        let (client, contract_id, _factory, token_id) = setup(&env, lock_threshold - 1);
+        let mut state = client.get_state();
+        state.config.max_bet_share_bps = 2_000;
+        state.pool_a = 1_000_000_000;
+        state.total_pool = 1_000_000_000;
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        let bettor = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &token_id)
+            .mint(&bettor, &251_000_000i128);
+
+        client.place_bet(
+            &bettor,
+            &BetSide::FighterA,
+            &200_000_000i128,
+            &token_id,
+            &0i128,
+        );
+        let result = client.try_place_bet(
+            &bettor,
+            &BetSide::FighterB,
+            &51_000_000i128,
+            &token_id,
+            &0i128,
+        );
+
+        assert_eq!(result.unwrap_err(), Ok(ContractError::BetLimitExceeded));
+        assert_eq!(client.get_bets_by_address(&bettor).len(), 1);
+        assert_eq!(client.get_state().total_pool, 1_200_000_000i128);
+    }
+
+    /// Distinct bettors can both place bets while remaining below the pool-share cap.
+    #[test]
+    fn test_two_bettors_below_pool_share_cap_succeed() {
+        let lock_threshold = SCHEDULED_AT - LOCK_BEFORE_SECS;
+        let env = Env::default();
+        let (client, contract_id, _factory, token_id) = setup(&env, lock_threshold - 1);
+        let mut state = client.get_state();
+        state.config.max_bet_share_bps = 2_000;
+        state.pool_a = 1_000_000_000;
+        state.total_pool = 1_000_000_000;
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        let bettor_a = Address::generate(&env);
+        let bettor_b = Address::generate(&env);
+        let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_id);
+        token_client.mint(&bettor_a, &100_000_000i128);
+        token_client.mint(&bettor_b, &100_000_000i128);
+
+        let result_a = client.try_place_bet(
+            &bettor_a,
+            &BetSide::FighterA,
+            &100_000_000i128,
+            &token_id,
+            &0i128,
+        );
+        let result_b = client.try_place_bet(
+            &bettor_b,
+            &BetSide::FighterB,
+            &100_000_000i128,
+            &token_id,
+            &0i128,
+        );
+
+        assert!(result_a.is_ok());
+        assert!(result_b.is_ok());
+        assert_eq!(client.get_state().total_pool, 1_200_000_000i128);
     }
 
     /// Bets placed exactly at the lock threshold must return BettingClosed.
@@ -2314,6 +2415,7 @@ mod min_bet_enforcement_tests {
         MarketConfig {
             min_bet_amount,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -2325,7 +2427,7 @@ mod min_bet_enforcement_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -2460,6 +2562,7 @@ mod place_bet_boundary_fuzz_tests {
         MarketConfig {
             min_bet_amount: 1,
             max_bet: i128::MAX,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -2471,7 +2574,7 @@ mod place_bet_boundary_fuzz_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -2595,6 +2698,7 @@ mod get_all_bets_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -2606,7 +2710,7 @@ mod get_all_bets_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -2795,6 +2899,7 @@ mod market_lifecycle_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: LOCK_BEFORE,
             resolution_window: 86_400,
@@ -2805,7 +2910,7 @@ mod market_lifecycle_tests {
     fn set_time(env: &Env, ts: u64) {
         env.ledger().set(LedgerInfo {
             timestamp: ts,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -3204,6 +3309,7 @@ mod stale_oracle_reports_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -3229,7 +3335,7 @@ mod stale_oracle_reports_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -3298,11 +3404,7 @@ mod stale_oracle_reports_tests {
         let (client, contract_id, factory) = setup(&env, now);
         let oracle = Address::generate(&env);
 
-        inject_pending(
-            &env,
-            &contract_id,
-            &[(oracle.clone(), make_report(&env, &oracle, submitted_at))],
-        );
+        inject_pending(&env, &contract_id, &[(oracle.clone(), make_report(&env, &oracle, submitted_at))]);
 
         let cleared = client.clear_stale_reports(&factory);
         assert_eq!(cleared, 1, "Report aged exactly REPORT_TTL must be cleared");
@@ -3480,6 +3582,7 @@ mod reentrancy_regression_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -3782,6 +3885,7 @@ mod event_emission_consistency_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -4349,6 +4453,7 @@ mod slippage_bounds_tests {
         MarketConfig {
             min_bet_amount: 1,
             max_bet: i128::MAX,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -4577,6 +4682,7 @@ mod upgrade_safety_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -4958,6 +5064,7 @@ mod claim_refund_integrity_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: LOCK_BEFORE_SECS,
             resolution_window: 86_400,
@@ -5196,6 +5303,7 @@ mod amm_slippage_tier8_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -5699,7 +5807,9 @@ mod storage_integrity_and_lifecycle_tests {
         env: &Env,
         event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
     ) -> BetRecord {
-        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+        let payload: boxmeout_shared::types::BetPlacedPayload =
+            soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap();
+        payload.bet
     }
 
     /// A min_shares_out above the executable share count must be rejected with
@@ -6025,6 +6135,7 @@ mod oracle_two_of_three_tier8_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -6985,6 +7096,7 @@ mod amm_slippage_tier10_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -7326,7 +7438,9 @@ mod oracle_pending_reports_ttl_tests {
         env: &Env,
         event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
     ) -> BetRecord {
-        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+        let payload: boxmeout_shared::types::BetPlacedPayload =
+            soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap();
+        payload.bet
     }
 
     /// Slippage boundary: impact == MAX_SLIPPAGE_BPS must be accepted (tier 10).
@@ -7464,6 +7578,7 @@ mod oracle_two_of_three_tier10_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -7744,6 +7859,7 @@ mod amm_slippage_tier12_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -7801,7 +7917,9 @@ mod amm_slippage_tier12_tests {
         env: &Env,
         event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
     ) -> BetRecord {
-        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+        let payload: boxmeout_shared::types::BetPlacedPayload =
+            soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap();
+        payload.bet
     }
 
     /// Large bet into thin pool is rejected as BetTooLarge (tier 12).
@@ -7944,6 +8062,7 @@ mod oracle_two_of_three_tier12_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -8202,6 +8321,7 @@ mod amm_slippage_tier14_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -8259,7 +8379,9 @@ mod amm_slippage_tier14_tests {
         env: &Env,
         event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
     ) -> BetRecord {
-        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+        let payload: boxmeout_shared::types::BetPlacedPayload =
+            soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap();
+        payload.bet
     }
 
     /// Large bet into thin pool rejected as BetTooLarge (tier 14).
@@ -8410,6 +8532,7 @@ mod oracle_two_of_three_tier14_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -8754,3 +8877,228 @@ mod oracle_pending_reports_ttl_tiers_tests {
         );
     }
 }
+
+// ============================================================
+// ISSUES #631, #632, #633, #634 TEST MODULE
+// ============================================================
+#[cfg(test)]
+mod issue_631_to_634_tests {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env, Symbol,
+    };
+    use boxmeout_shared::errors::ContractError;
+    use boxmeout_shared::types::{
+        BetSide, FightDetails, MarketConfig, MarketState, MarketStatus,
+        OptionalOutcome, Outcome,
+    };
+    use crate::Market;
+
+    const SCHEDULED_AT: u64 = 100_000;
+    const LOCK_BEFORE_SECS: u64 = 3_600;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "TEST-MATCH-2026"),
+            fighter_a: soroban_sdk::String::from_str(env, "FighterA"),
+            fighter_b: soroban_sdk::String::from_str(env, "FighterB"),
+            weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Vegas"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: LOCK_BEFORE_SECS,
+            resolution_window: 86_400,
+            tier: 0,
+            dispute_cooldown_ledgers: 0,
+        }
+    }
+
+    fn setup(
+        env: &Env,
+        timestamp: u64,
+    ) -> (crate::MarketClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury, &0u32);
+
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, contract_id, factory, token_id)
+    }
+
+    // ── Issue #634: Market lock time boundary tests ─────────────
+    #[test]
+    fn test_issue_634_bet_at_exact_lock_boundary_rejected() {
+        let lock_threshold = SCHEDULED_AT - LOCK_BEFORE_SECS;
+        let env = Env::default();
+        let (client, _contract_id, _factory, token_id) = setup(&env, lock_threshold);
+
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let result = client.try_place_bet(
+            &bettor,
+            &BetSide::FighterA,
+            &1_000_000i128,
+            &token_id,
+            &0i128,
+        );
+        assert_eq!(result.unwrap_err(), Ok(ContractError::BettingClosed));
+    }
+
+    #[test]
+    fn test_issue_634_bet_before_lock_boundary_succeeds() {
+        let lock_threshold = SCHEDULED_AT - LOCK_BEFORE_SECS;
+        let env = Env::default();
+        let (client, _contract_id, _factory, token_id) = setup(&env, lock_threshold - 1);
+
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let result = client.try_place_bet(
+            &bettor,
+            &BetSide::FighterA,
+            &1_000_000i128,
+            &token_id,
+            &0i128,
+        );
+        assert!(result.is_ok(), "Bet at fight_time - lock_before_secs - 1 must succeed");
+    }
+
+    // ── Issue #633: Shares burned and storage key removed after claim ─────
+    #[test]
+    fn test_issue_633_shares_burned_storage_key_removed_after_claim() {
+        let env = Env::default();
+        let (client, contract_id, _factory, token_id) = setup(&env, 1_000);
+
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+        StellarAssetClient::new(&env, &token_id).mint(&contract_id, &10_000_000i128);
+
+        let share_key = (Symbol::new(&env, "BET"), bettor.clone());
+
+        // Count persistent storage entries before placing bet
+        let count_persistent_entries = || {
+            let mut count = 0;
+            for key in ["STATE", "BETTOR_LIST", "FACTORY", "TREASURY"] {
+                if env.as_contract(&contract_id, || env.storage().persistent().has(&key)) {
+                    count += 1;
+                }
+            }
+            if env.as_contract(&contract_id, || env.storage().persistent().has(&share_key)) {
+                count += 1;
+            }
+            count
+        };
+
+        let initial_entry_count = count_persistent_entries();
+
+        // Place a bet
+        client.place_bet(&bettor, &BetSide::FighterA, &10_000_000i128, &token_id, &0i128);
+
+        // Verify storage key exists after bet
+        let key_exists_before = env.as_contract(&contract_id, || {
+            env.storage().persistent().has(&share_key)
+        });
+        assert!(key_exists_before, "Share key must exist after placing bet");
+        assert_eq!(count_persistent_entries(), initial_entry_count + 1);
+
+        // Manually resolve market as FighterA
+        env.as_contract(&contract_id, || {
+            let mut state: MarketState = env.storage().persistent().get(&"STATE").unwrap();
+            state.status = MarketStatus::Resolved;
+            state.outcome = OptionalOutcome::Some(Outcome::FighterA);
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        // Claim winnings
+        let receipt = client.claim_winnings(&bettor, &token_id);
+        assert!(receipt.amount_won > 0);
+
+        // Verify storage key NO LONGER exists after claim
+        let key_exists_after = env.as_contract(&contract_id, || {
+            env.storage().persistent().has(&share_key)
+        });
+        assert!(!key_exists_after, "Share key must no longer exist after claim");
+
+        // Confirm ledger entry count before bet and after claim are equal
+        let post_claim_entry_count = count_persistent_entries();
+        assert_eq!(
+            initial_entry_count, post_claim_entry_count,
+            "Ledger entry count before bet and after claim must be equal"
+        );
+    }
+
+    // ── Issue #632: Market resolution allow_draw check ───────────
+    #[test]
+    fn test_issue_632_resolving_no_draw_market_with_draw_rejected() {
+        let env = Env::default();
+        let (client, contract_id, factory, _token_id) = setup(&env, SCHEDULED_AT + 100);
+
+        // Lock market first
+        env.as_contract(&contract_id, || {
+            let mut state: MarketState = env.storage().persistent().get(&"STATE").unwrap();
+            state.status = MarketStatus::Locked;
+            env.storage().persistent().set(&"STATE", &state);
+            // Market created without draw support
+            env.storage().persistent().set(&"ALLOW_DRAW", &false);
+        });
+
+        // Resolve dispute with Draw should fail with DrawNotAllowed
+        let result = client.try_resolve_dispute(&factory, &Outcome::Draw);
+        assert_eq!(result.unwrap_err(), Ok(ContractError::DrawNotAllowed));
+    }
+
+    #[test]
+    fn test_issue_632_resolving_draw_enabled_market_with_draw_succeeds() {
+        let env = Env::default();
+        let (client, contract_id, factory, _token_id) = setup(&env, SCHEDULED_AT + 100);
+
+        // Lock market first
+        env.as_contract(&contract_id, || {
+            let mut state: MarketState = env.storage().persistent().get(&"STATE").unwrap();
+            state.status = MarketStatus::Locked;
+            env.storage().persistent().set(&"STATE", &state);
+            // Draw enabled
+            env.storage().persistent().set(&"ALLOW_DRAW", &true);
+        });
+
+        let result = client.try_resolve_dispute(&factory, &Outcome::Draw);
+        assert!(result.is_ok(), "Resolving draw-enabled market with Draw must succeed");
+        let state = client.get_state();
+        assert_eq!(state.status, MarketStatus::Resolved);
+        assert_eq!(state.outcome, OptionalOutcome::Some(Outcome::Draw));
+    }
+
+    // ── Issue #631: Payout calculation overflow in Market ───────
+    #[test]
+    fn test_issue_631_payout_calculation_overflow_returns_arithmetic_overflow() {
+        let half_max = i128::MAX / 2;
+        let res = boxmeout_shared::math::calculate_payout(half_max, 3, 1);
+        assert_eq!(res.unwrap_err(), ContractError::ArithmeticOverflow);
+    }
+}
+

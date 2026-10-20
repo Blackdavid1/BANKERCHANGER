@@ -1,12 +1,38 @@
 import { rpc, scValToNative } from '@stellar/stellar-sdk';
-import { getCursor, saveCursor, getLastKnownLedger, upsertInvoice } from './db';
+import { getCursor, saveCursor } from './db';
 import { updateLastLedger } from './health';
 import { detectLedgerAnomaly, computeResyncStartLedger } from './ledgerContinuity';
 import { calculateBackoff, loadBackoffConfigFromEnv } from './backoff';
 import { broadcast } from './ws';
+import { acquireDistributedLock } from './distributedLock';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+export const DEFAULT_BATCH_SIZE = 50;
+export const MAX_BATCH_SIZE = 500;
+
+export function resolveBatchSize(envVal: string | undefined = process.env.INDEXER_BATCH_SIZE): number {
+  if (!envVal) return DEFAULT_BATCH_SIZE;
+  const parsed = parseInt(envVal, 10);
+  if (isNaN(parsed) || parsed <= 0) {
+    console.warn(`[WARN] Invalid INDEXER_BATCH_SIZE="${envVal}", falling back to default ${DEFAULT_BATCH_SIZE}`);
+    return DEFAULT_BATCH_SIZE;
+  }
+  if (parsed > MAX_BATCH_SIZE) {
+    console.warn(`[WARN] INDEXER_BATCH_SIZE ${parsed} exceeds maximum ${MAX_BATCH_SIZE}; capping at ${MAX_BATCH_SIZE}`);
+    return MAX_BATCH_SIZE;
+  }
+  return parsed;
+}
+
+export function computeEffectiveBatchSize(ledgerLag: number): number {
+  const baseSize = resolveBatchSize();
+  if (ledgerLag > 1000) {
+    return MAX_BATCH_SIZE;
+  }
+  return baseSize;
+}
 
 const RPC_URL = process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
 const CONTRACT_ID = process.env.FACTORY_CONTRACT_ADDRESS;
@@ -14,8 +40,30 @@ const CONTRACT_ID = process.env.FACTORY_CONTRACT_ADDRESS;
 if (!CONTRACT_ID) {
   throw new Error('FACTORY_CONTRACT_ADDRESS environment variable is not set. Cannot initialize indexer.');
 }
+const contractId = CONTRACT_ID;
 
 const server = new rpc.Server(RPC_URL);
+
+const SOROBAN_EVENT_TYPES = new Set([
+  'market_created',
+  'market_locked',
+  'market_resolved',
+  'bet_placed',
+  'winnings_claimed',
+  'refund_claimed',
+  'market_cancelled',
+  'market_disputed',
+  'dispute_resolved',
+  'admin_proposed',
+  'admin_transferred',
+  'fee_deposited',
+  'fee_withdrawn',
+  'emergency_drain',
+  'config_updated',
+  'conflicting_oracle_report',
+  'contract_upgraded',
+  'stale_reports_cleared',
+]);
 
 // ── Polling state for health monitoring ────────────────────────────────────
 interface PollerHealth {
@@ -48,6 +96,17 @@ export function getPollerHealth(): PollerHealth {
   return { ...pollerHealth };
 }
 
+// ── Duplicate events skipped metric (Issue #687) ───────────────────────────
+export let indexer_duplicate_events_skipped_total = 0;
+
+export function getIndexerDuplicateEventsSkippedTotal(): number {
+  return indexer_duplicate_events_skipped_total;
+}
+
+export function resetIndexerDuplicateEventsSkippedTotal(): void {
+  indexer_duplicate_events_skipped_total = 0;
+}
+
 // ── Exponential backoff strategy (tunable via POLLER_*_BACKOFF_MS env vars) ─
 const BACKOFF_CONFIG = loadBackoffConfigFromEnv();
 
@@ -70,7 +129,7 @@ function log(level: 'info' | 'warn' | 'error', message: string, context?: Record
 }
 
 export async function pollEvents() {
-  log('info', 'Indexer poller started', { contractId: CONTRACT_ID, rpcUrl: RPC_URL });
+  log('info', 'Indexer poller started', { contractId, rpcUrl: RPC_URL });
   pollerHealth.isRunning = true;
 
   let cursor = (await getCursor()) || '';
@@ -103,6 +162,19 @@ export async function pollEvents() {
 
   // Recursive async loop with exponential backoff
   async function pollLoop(): Promise<void> {
+    const lock = await acquireDistributedLock({
+      key: 'indexer:poll:lock',
+      ttl: LOCK_TTL_SECONDS,
+    });
+
+    if (!lock) {
+      log('warn', 'Indexer poller lock contention: skipping cycle', {
+        metric: 'indexer_lock_contention_total',
+      });
+      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+      return pollLoop();
+    }
+
     try {
       // A pending resync (set after a re-org) always takes priority over the
       // persisted cursor, since the cursor may point past ledgers that no
@@ -113,6 +185,10 @@ export async function pollEvents() {
         cursor = '';
       }
 
+      const latestLedger = await getLatestLedger().catch(() => lastProcessedLedger ?? 0);
+      const lag = Math.max(0, latestLedger - (lastProcessedLedger ?? latestLedger));
+      const batchLimit = computeEffectiveBatchSize(lag);
+
       // Build request with proper typing (use any to bypass strict filter type checking)
       const request: any = (cursor && resyncLedger === null)
         ? {
@@ -120,22 +196,22 @@ export async function pollEvents() {
             filters: [
               {
                 type: 'contract',
-                contractIds: [CONTRACT_ID],
+                contractIds: [contractId],
                 topics: [['*']]
               }
             ],
-            limit: 100
+            limit: batchLimit
           }
         : {
-            startLedger: resyncLedger ?? (await getLatestLedger()),
+            startLedger: resyncLedger ?? latestLedger,
             filters: [
               {
                 type: 'contract',
-                contractIds: [CONTRACT_ID],
+                contractIds: [contractId],
                 topics: [['*']]
               }
             ],
-            limit: 100
+            limit: batchLimit
           };
 
       // Poll for events with pagination support
@@ -157,7 +233,7 @@ export async function pollEvents() {
         // Build request with proper typing
         let paginatedRequest: any = {
           filters,
-          limit: 100,
+          limit: batchLimit,
         };
 
         // Set cursor or startLedger
@@ -169,12 +245,17 @@ export async function pollEvents() {
 
         const response = await server.getEvents(paginatedRequest);
 
-        // Process all events on this page
+        // Process all events on this page grouped by ledger sequence
         if (response.events && response.events.length > 0) {
+          const eventsByLedger: Map<number, rpc.Api.EventResponse[]> = new Map();
           for (const event of response.events) {
-            const eventLedger = event.ledger;
+            const l = event.ledger || 0;
+            if (!eventsByLedger.has(l)) eventsByLedger.set(l, []);
+            eventsByLedger.get(l)!.push(event);
+          }
 
-            if (eventLedger) {
+          for (const [eventLedger, ledgerEvents] of eventsByLedger) {
+            if (eventLedger > 0) {
               const anomaly = detectLedgerAnomaly(eventLedger, lastProcessedLedger);
 
               if (anomaly.type === 'reorg') {
@@ -207,9 +288,13 @@ export async function pollEvents() {
               }
             }
 
-            processEvent(event);
+            // Commit all events in this ledger first
+            for (const event of ledgerEvents) {
+              processEvent(event);
+            }
 
-            if (eventLedger) {
+            // Last processed ledger saved ONLY after all events in that ledger are committed (Issue #687)
+            if (eventLedger > 0) {
               lastProcessedLedger = eventLedger;
               updateLastLedger(eventLedger);
             }
@@ -264,10 +349,6 @@ export async function pollEvents() {
       pollerHealth.lastErrorAt = null;
       pollerHealth.lastSuccessfulPollAt = new Date().toISOString();
 
-      // Schedule next poll immediately (no fixed interval, just loop)
-      await new Promise(resolve => setImmediate(resolve));
-      await pollLoop();
-
     } catch (err) {
       pollerHealth.consecutiveFailures++;
       pollerHealth.lastError = err instanceof Error ? err.message : String(err);
@@ -289,9 +370,16 @@ export async function pollEvents() {
       });
 
       // Wait with exponential backoff before retrying
+      await lock.release();
       await new Promise(resolve => setTimeout(resolve, backoffMs));
-      await pollLoop();
+      return pollLoop();
+    } finally {
+      await lock.release();
     }
+
+    // Schedule next poll immediately after releasing lock
+    await new Promise(resolve => setImmediate(resolve));
+    return pollLoop();
   }
 
   // Start the polling loop
@@ -318,8 +406,7 @@ async function getLatestLedger(): Promise<number> {
 }
 
 export function processEvent(event: rpc.Api.EventResponse) {
-  // Topics are scVals, typically symbol strings
-  const topics = event.topic.map((t: any) => {
+  const topics = event.topic.map(t => {
     try {
       return scValToNative(t);
     } catch {
@@ -327,59 +414,8 @@ export function processEvent(event: rpc.Api.EventResponse) {
     }
   });
 
-  const eventType = topics[0]; // e.g. 'submitted', 'funded', 'paid', 'defaulted'
-  if (!eventType) return;
+  const eventType = topics[0];
+  if (typeof eventType !== 'string' || !SOROBAN_EVENT_TYPES.has(eventType)) return;
 
-  try {
-    const data = scValToNative(event.value);
-    
-    // Assume data contains { id, freelancer, payer, amount, dueDate } for 'submitted'
-    // and just { id } for status changes. This is dependent on contract implementation.
-    
-    if (eventType === 'submitted') {
-      const invoiceId = data.id;
-      upsertInvoice({
-        id: invoiceId,
-        freelancer: data.freelancer || '',
-        payer: data.payer || '',
-        amount: data.amount || 0,
-        due_date: data.dueDate || new Date().toISOString(),
-        status: 'Pending'
-      });
-      log('info', 'Processed event: submitted', { invoiceId });
-      broadcast({ type: 'invoice.submitted', timestamp: new Date().toISOString(), data: { invoiceId } });
-    } else if (eventType === 'funded') {
-      const invoiceId = data.id || data;
-      upsertInvoice({
-        id: invoiceId,
-        freelancer: '', payer: '', amount: 0, due_date: '',
-        status: 'Funded'
-      });
-      log('info', 'Processed event: funded', { invoiceId });
-      broadcast({ type: 'invoice.funded', timestamp: new Date().toISOString(), data: { invoiceId } });
-    } else if (eventType === 'paid') {
-      const invoiceId = data.id || data;
-      upsertInvoice({
-        id: invoiceId,
-        freelancer: '', payer: '', amount: 0, due_date: '',
-        status: 'Paid'
-      });
-      log('info', 'Processed event: paid', { invoiceId });
-      broadcast({ type: 'invoice.paid', timestamp: new Date().toISOString(), data: { invoiceId } });
-    } else if (eventType === 'defaulted') {
-      const invoiceId = data.id || data;
-      upsertInvoice({
-        id: invoiceId,
-        freelancer: '', payer: '', amount: 0, due_date: '',
-        status: 'Defaulted'
-      });
-      log('info', 'Processed event: defaulted', { invoiceId });
-      broadcast({ type: 'invoice.defaulted', timestamp: new Date().toISOString(), data: { invoiceId } });
-    }
-  } catch (err) {
-    log('error', 'Failed to process event', {
-      eventId: event.id,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  log('info', 'Processed Soroban market event', { eventType, eventId: event.id });
 }

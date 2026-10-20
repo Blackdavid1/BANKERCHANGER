@@ -17,10 +17,15 @@ import type {
   ReferralSummary,
   ReferralPayoutResult,
   UserNotification,
+  MyLeaderboardRank,
 } from '../types';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
-
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+if (!API_BASE) {
+  throw new Error(
+    'NEXT_PUBLIC_API_URL is not set. Copy frontend/.env.example to frontend/.env.local and set it, or configure it in your deployment environment.',
+  );
+}
 export class NotFoundError extends Error {
   constructor(message = 'Not found') { super(message); this.name = 'NotFoundError'; }
 }
@@ -34,13 +39,20 @@ export class TimeoutError extends Error {
 }
 
 const TIMEOUT_MS = 10000; // 10 seconds
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 500; // 500ms, 1s, 2s
 
 type ApiOptions = {
   method?: 'GET' | 'POST';
   body?: unknown;
 };
 
-async function apiFetch<T>(path: string, options: ApiOptions = {}): Promise<T> {
+// Fetch failures and 503 responses; apiFetch retries these. Still a NetworkError to callers.
+class RetryableNetworkError extends NetworkError {}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function apiFetchOnce<T>(path: string, options: ApiOptions): Promise<T> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -58,16 +70,33 @@ async function apiFetch<T>(path: string, options: ApiOptions = {}): Promise<T> {
     if ((e as Error).name === 'AbortError') {
       throw new TimeoutError();
     }
-    throw new NetworkError((e as Error).message);
+    throw new RetryableNetworkError((e as Error).message);
   } finally {
     clearTimeout(timeoutId);
   }
   if (res.status === 404) throw new NotFoundError();
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new NetworkError(`Unexpected response: ${res.status} ${detail}`);
+    const message = `Unexpected response: ${res.status} ${detail}`;
+    if (res.status === 503) throw new RetryableNetworkError(message);
+    throw new NetworkError(message);
   }
   return res.json() as Promise<T>;
+}
+
+/**
+ * Retries up to MAX_RETRIES times with exponential backoff on fetch network
+ * errors and 503 responses. 4xx and other errors are thrown immediately.
+ */
+async function apiFetch<T>(path: string, options: ApiOptions = {}): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await apiFetchOnce<T>(path, options);
+    } catch (e) {
+      if (!(e instanceof RetryableNetworkError) || attempt >= MAX_RETRIES) throw e;
+      await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt);
+    }
+  }
 }
 
 export interface MarketFilters {
@@ -116,6 +145,14 @@ export async function fetchMarkets(
  */
 export async function fetchMarketById(market_id: string): Promise<Market> {
   return apiFetch<Market>(`/api/markets/${market_id}`);
+}
+
+export async function fetchActivityFeedToken(): Promise<string> {
+  const result = await apiFetch<{ accessToken: string }>(
+    '/auth/activity-feed-token',
+    { method: 'POST' },
+  );
+  return result.accessToken;
 }
 
 /**
@@ -222,4 +259,11 @@ export async function fetchNotifications(address: string, limit = 50): Promise<U
   return apiFetch<UserNotification[]>(
     `/api/engagement/notifications/${address}?limit=${limit}`,
   );
+}
+/**
+ * Calls GET /api/engagement/leaderboard/rank.
+ * Returns the authenticated caller's leaderboard rank.
+ */
+export async function fetchMyLeaderboardRank(): Promise<MyLeaderboardRank> {
+  return apiFetch<MyLeaderboardRank>('/api/engagement/leaderboard/rank');
 }

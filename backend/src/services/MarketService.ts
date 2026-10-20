@@ -10,6 +10,8 @@ import { pool } from '../config/db';
 import * as cache from './cache.service';
 import * as StellarService from './StellarService';
 import { AppError } from '../utils/AppError';
+import { ERROR_CODES } from '../constants/errorCodes';
+import { logger } from '../utils/logger';
 
 // ---------------------------------------------------------------------------
 // DB adapter — thin abstraction so tests can inject a mock
@@ -82,33 +84,49 @@ export const defaultDbAdapter: DbAdapter = {
       'ORDER BY scheduled_at DESC';
 
     const { rows } = await pool.query(
-      `SELECT * FROM markets ${whereSql} ${orderBySql}`,
+      `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
+       FROM markets m
+       LEFT JOIN (
+         SELECT market_id, COUNT(*) AS bet_count
+         FROM bets
+         GROUP BY market_id
+       ) b ON m.market_id = b.market_id
+       ${whereSql} ${orderBySql}`,
       values,
     );
 
     return rows.map((row) => ({
       ...row,
+      bet_count: Number(row.bet_count ?? 0),
       scheduled_at: new Date(row.scheduled_at),
       created_at: new Date(row.created_at),
       updated_at: new Date(row.updated_at),
       resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
-    } as Market));
+    } as Market & { bet_count: number }));
   },
 
   async findMarketById(market_id: string): Promise<Market | null> {
     const { rows } = await pool.query(
-      'SELECT * FROM markets WHERE market_id = $1',
+      `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
+       FROM markets m
+       LEFT JOIN (
+         SELECT market_id, COUNT(*) AS bet_count
+         FROM bets
+         GROUP BY market_id
+       ) b ON m.market_id = b.market_id
+       WHERE m.market_id = $1`,
       [market_id],
     );
     if (rows.length === 0) return null;
     const row = rows[0];
     return {
       ...row,
+      bet_count: Number(row.bet_count ?? 0),
       scheduled_at: new Date(row.scheduled_at),
       created_at: new Date(row.created_at),
       updated_at: new Date(row.updated_at),
       resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
-    } as Market;
+    } as Market & { bet_count: number };
   },
 
   async findBetsByAddress(bettor_address: string): Promise<Bet[]> {
@@ -332,26 +350,39 @@ export async function getMarkets(
       'ORDER BY scheduled_at DESC';
     const offset = (page - 1) * limit;
 
-    const rows = await pool.query(
-      `SELECT * FROM markets ${whereSql} ${orderBySql} LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
-      [...values, limit, offset],
-    );
+    try {
+      const rows = await pool.query(
+        `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
+         FROM markets m
+         LEFT JOIN (
+           SELECT market_id, COUNT(*) AS bet_count
+           FROM bets
+           GROUP BY market_id
+         ) b ON m.market_id = b.market_id
+         ${whereSql} ${orderBySql} LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+        [...values, limit, offset],
+      );
 
-    const countRows = await pool.query(
-      `SELECT COUNT(*) AS total FROM markets ${whereSql}`,
-      values,
-    );
+      const countRows = await pool.query(
+        `SELECT COUNT(*) AS total FROM markets ${whereSql}`,
+        values,
+      );
 
-    result = {
-      markets: rows.rows.map((row) => ({
-        ...row,
-        scheduled_at: new Date(row.scheduled_at),
-        created_at: new Date(row.created_at),
-        updated_at: new Date(row.updated_at),
-        resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
-      } as Market)),
-      total: Number(countRows.rows[0]?.total ?? 0),
-    };
+      result = {
+        markets: rows.rows.map((row) => ({
+          ...row,
+          scheduled_at: new Date(row.scheduled_at),
+          created_at: new Date(row.created_at),
+          updated_at: new Date(row.updated_at),
+          resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
+        } as Market)),
+        total: Number(countRows.rows[0]?.total ?? 0),
+      };
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      logger.error({ err }, 'MarketService.getMarkets: database query failed');
+      throw AppError.internalError('Failed to retrieve markets', ERROR_CODES.DATABASE_ERROR);
+    }
   }
 
   await cache.set(cacheKey, result, 30);
@@ -565,16 +596,22 @@ export async function getBetsByAddress(bettor_address: string): Promise<Bet[]> {
     return db().findBetsByAddress(bettor_address);
   }
 
-  const { rows } = await pool.query(
-    'SELECT * FROM bets WHERE bettor_address = $1 ORDER BY placed_at DESC',
-    [bettor_address],
-  );
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM bets WHERE bettor_address = $1 ORDER BY placed_at DESC',
+      [bettor_address],
+    );
 
-  return rows.map((row) => ({
-    ...row,
-    placed_at: new Date(row.placed_at),
-    claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
-  } as Bet));
+    return rows.map((row) => ({
+      ...row,
+      placed_at: new Date(row.placed_at),
+      claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
+    } as Bet));
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    logger.error({ err }, 'MarketService.getBetsByAddress: database query failed');
+    throw AppError.internalError('Failed to retrieve bets', ERROR_CODES.DATABASE_ERROR);
+  }
 }
 
 export async function getBettorStats(bettor_address: string): Promise<BettorStats> {
@@ -636,12 +673,18 @@ export async function getBetsByMarket(
 
   sql += ' ORDER BY placed_at DESC';
 
-  const { rows } = await pool.query(sql, values);
-  return rows.map((row) => ({
-    ...row,
-    placed_at: new Date(row.placed_at),
-    claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
-  } as Bet));
+  try {
+    const { rows } = await pool.query(sql, values);
+    return rows.map((row) => ({
+      ...row,
+      placed_at: new Date(row.placed_at),
+      claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
+    } as Bet));
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    logger.error({ err }, 'MarketService.getBetsByMarket: database query failed');
+    throw AppError.internalError('Failed to retrieve bets for market', ERROR_CODES.DATABASE_ERROR);
+  }
 }
 
 /**
@@ -813,9 +856,15 @@ export async function getPlatformStats(): Promise<PlatformStats> {
 
   const marketsResult = await pool.query(
     "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as active, SUM(total_pool) as volume FROM markets"
-  );
+  ).catch((err) => {
+    logger.error({ err }, 'MarketService.getPlatformStats: markets query failed');
+    throw AppError.internalError('Failed to retrieve platform statistics', ERROR_CODES.DATABASE_ERROR);
+  });
 
-  const betsResult = await pool.query('SELECT COUNT(*) as total FROM bets');
+  const betsResult = await pool.query('SELECT COUNT(*) as total FROM bets').catch((err) => {
+    logger.error({ err }, 'MarketService.getPlatformStats: bets query failed');
+    throw AppError.internalError('Failed to retrieve platform statistics', ERROR_CODES.DATABASE_ERROR);
+  });
 
   const { total: totalMarkets, active: activeMarkets, volume: totalPoolStroops } = marketsResult.rows[0];
   const { total: totalBets } = betsResult.rows[0];
@@ -868,7 +917,12 @@ export async function bulkPauseMarkets(marketIds: string[]): Promise<BulkResult>
         result.succeeded.push(id);
       }
     } catch (err) {
-      result.failed.push({ id, reason: err instanceof Error ? err.message : String(err) });
+      if (err instanceof AppError) {
+        result.failed.push({ id, reason: err.message });
+      } else {
+        logger.error({ err, id }, 'MarketService.bulkPauseMarkets: database query failed');
+        result.failed.push({ id, reason: 'Internal database error' });
+      }
     }
   }
 
@@ -919,7 +973,12 @@ export async function bulkCancelMarkets(
 
       result.succeeded.push(id);
     } catch (err) {
-      result.failed.push({ id, reason: err instanceof Error ? err.message : String(err) });
+      if (err instanceof AppError) {
+        result.failed.push({ id, reason: err.message });
+      } else {
+        logger.error({ err, id }, 'MarketService.bulkCancelMarkets: database query failed');
+        result.failed.push({ id, reason: 'Internal database error' });
+      }
     }
   }
 
