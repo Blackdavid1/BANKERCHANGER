@@ -12,7 +12,8 @@ This runbook provides step-by-step procedures for responding to common productio
 5. [Contract Pause Events](#contract-pause-events)
 6. [High Dispute Volumes](#high-dispute-volumes)
 7. [RPC Node Outages](#rpc-node-outages)
-8. [Quick Reference: CLI Commands](#quick-reference-cli-commands)
+8. [Load Testing Guidelines](#load-testing-guidelines)
+9. [Quick Reference: CLI Commands](#quick-reference-cli-commands)
 
 ---
 
@@ -1061,6 +1062,69 @@ curl -s http://localhost:8000/health | jq '{
 - **Level 1 (0-5 min):** Check RPC health, verify connectivity
 - **Level 2 (5-30 min):** Restart services, consider failover
 - **Level 3 (>30 min):** Executive notification, activate disaster recovery plan
+
+---
+
+## Load Testing Guidelines
+
+### Overview
+
+BANKERCHANGER uses [k6](https://k6.io/) to conduct automated load testing on backend real-time services. Specifically, WebSocket endpoints handling real-time activity feeds and market subscription events must maintain low latency and zero message loss under peak concurrent client loads.
+
+### Running Load Tests
+
+To run the load test locally or in staging environments:
+
+```bash
+# Navigate to the backend directory
+cd backend
+
+# Execute load test against local backend (default port 3001)
+k6 run tests/load/activity-feed.loadtest.js -e WS_URL=ws://localhost:3001
+
+# Execute against staging environment with custom virtual user count
+k6 run tests/load/activity-feed.loadtest.js -e WS_URL=wss://staging.bankerchanger.com/ws
+```
+
+### Targets and Profile
+
+The load test simulates 100 concurrent WebSocket connections (100 VUs) subscribing to activity feeds across active markets:
+- **Ramp-up:** 0 to 100 VUs over 10 seconds.
+- **Sustained Load:** 100 concurrent VUs sustained for 30 seconds.
+- **Ramp-down:** 100 down to 0 VUs over 10 seconds.
+- **Graceful Shutdown:** 5 seconds.
+
+Each virtual user subscribes to 5 randomly chosen active markets and listens for broadcast activity updates.
+
+### Thresholds & Quality Gates
+
+The test defines explicit thresholds that must pass in local runs and GitHub Actions CI:
+- **`ws_connecting: p(95) < 200`**: 95% of WebSocket handshakes must complete within 200ms.
+- **`checks: rate > 0.99`**: At least 99% of WebSocket connection checks (HTTP 101 Switching Protocols) must succeed.
+- **`ws_sessions: count > 0`**: Ensures WebSocket sessions were actively established during the run.
+- **`errors: rate == 0`**: Zero protocol or socket errors permitted under load.
+
+### Interpreting WebSocket Metrics
+
+| Metric | Description | Health Indicator |
+|--------|-------------|------------------|
+| `ws_connecting` | Time elapsed establishing WebSocket handshake | Should stay consistently below 100ms; p95 < 200ms |
+| `ws_sessions` | Total count of WebSocket sessions initiated | Should match or exceed planned VU iterations |
+| `ws_msgs_received` | Count of activity feed messages received from server | Should be non-zero when events are broadcast |
+| `ws_msgs_sent` | Count of subscription requests sent by clients | 5 subscriptions per connected client |
+| `checks` | Percentage of validation assertions passed | Must be 100% (or >99% in high-contention test runs) |
+| `errors` | Unhandled connection drops or socket errors | Must be 0 |
+
+### Troubleshooting Failures
+
+1. **`ws_connecting` threshold exceeded (>200ms):**
+   - Check Node.js event loop delay using APM or performance metrics.
+   - Verify Redis Pub/Sub latency (`redis-cli --latency`).
+   - Increase available file descriptors (`ulimit -n 65535`).
+2. **WebSocket connection failures (checks < 99% or errors > 0):**
+   - Verify the backend server is running and accessible on the specified `WS_URL`.
+   - Inspect server logs for WebSocket upgrade rejection or uncaught exceptions: `tail -f backend.log`.
+   - Ensure reverse proxy or load balancer (e.g., NGINX) is configured with `Upgrade $http_upgrade` and `Connection "upgrade"` headers.
 
 ---
 
