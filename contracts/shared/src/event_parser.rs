@@ -287,7 +287,19 @@ mod tests {
     macro_rules! last_event {
         ($env:expr) => {{
             let all = $env.events().all();
-            all.last().unwrap()
+            let event = all.events().last().unwrap();
+
+            match &event.body {
+                soroban_sdk::xdr::ContractEventBody::V0(body) => {
+                    let mut topics = soroban_sdk::Vec::new(&$env);
+                    for topic in body.topics.iter() {
+                        topics.push_back(soroban_sdk::Val::try_from_val(&$env, &topic).unwrap());
+                    }
+                    let data = soroban_sdk::Val::try_from_val(&$env, &body.data).unwrap();
+                    (Address::generate(&$env), topics, data)
+                }
+                _ => panic!("unsupported contract event body variant"),
+            }
         }};
     }
 

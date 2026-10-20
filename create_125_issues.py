@@ -14,6 +14,7 @@ import time
 
 REPO = "doradenise-jpg/BANKERCHANGER"
 
+# Comprehensive labels required for the 125 issues
 LABELS = [
     {
         "name": "backend",
@@ -1319,7 +1320,7 @@ def main():
     for label in LABELS:
         name = label["name"]
         color = label["color"]
-        desc = label["description"]
+        desc = label.get("description", "")
         if gh_bin:
             cmd = [gh_bin, "label", "create", name, "--color", color, "--description", desc, "--repo", REPO, "--force"]
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1327,38 +1328,65 @@ def main():
             url = f"https://api.github.com/repos/{REPO}/labels"
             data = json.dumps({"name": name, "color": color, "description": desc})
             subprocess.run(["curl", "-s", "-X", "POST", "-H", f"Authorization: token {token}", "-H", "Accept: application/vnd.github.v3+json", url, "-d", data], stdout=subprocess.DEVNULL)
+    print("All labels verified.")
+
+def create_issue_api(gh_bin, token, title, body, labels):
+    payload = json.dumps({"title": title, "body": body, "labels": labels})
+    if gh_bin:
+        cmd = [gh_bin, "api", f"repos/{REPO}/issues", "--input", "-"]
+        proc = subprocess.run(cmd, input=payload, text=True, capture_output=True)
+        return proc.returncode == 0, proc.stdout, proc.stderr
+    elif token:
+        url = f"https://api.github.com/repos/{REPO}/issues"
+        proc = subprocess.run(
+            ["curl", "-s", "-w", "\n%{http_code}", "-X", "POST",
+             "-H", f"Authorization: token {token}",
+             "-H", "Accept: application/vnd.github.v3+json",
+             url, "-d", payload],
+            capture_output=True, text=True
+        )
+        lines = proc.stdout.strip().split("\n")
+        code = lines[-1] if lines else "500"
+        body_resp = "\n".join(lines[:-1])
+        return code in ["200", "201"], body_resp, f"HTTP {code}"
+    return False, "", "No gh CLI or GH_TOKEN found"
 
     print("Labels verified.")
 
     # 2. Create issues
     print(f"\nPushing {len(ISSUES)} issues to {REPO}...")
     success_count = 0
-    for idx, issue in enumerate(ISSUES, 1):
-        title = issue["title"]
-        body = issue["body"]
-        labels = ",".join(issue["labels"])
+    failed = []
 
-        if gh_bin:
-            cmd = [gh_bin, "issue", "create", "--repo", REPO, "--title", title, "--body", body, "--label", labels]
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode == 0:
+    print(f"\nStarting creation and push of {len(ISSUES)} issues to {REPO}...")
+    for idx, item in enumerate(ISSUES, 1):
+        title = item["title"]
+        body = item["body"]
+        labels = item["labels"]
+
+        retries = 3
+        created = False
+        while retries > 0 and not created:
+            ok, out, err = create_issue_api(gh_bin, token, title, body, labels)
+            if ok:
+                try:
+                    res_json = json.loads(out)
+                    issue_num = res_json.get("number", "N/A")
+                    print(f"[{idx}/{len(ISSUES)}] Created issue #{issue_num}: {title}")
+                except Exception:
+                    print(f"[{idx}/{len(ISSUES)}] Created issue: {title}")
                 success_count += 1
-                print(f"[{idx}/{len(ISSUES)}] Created issue: {title}")
-            else:
-                print(f"[{idx}/{len(ISSUES)}] Error creating issue: {res.stderr.strip()}")
-        elif token:
-            url = f"https://api.github.com/repos/{REPO}/issues"
-            payload = json.dumps({"title": title, "body": body, "labels": issue["labels"]})
-            res = subprocess.run(["curl", "-s", "-X", "POST", "-H", f"Authorization: token {token}", "-H", "Accept: application/vnd.github.v3+json", url, "-d", payload], capture_output=True, text=True)
-            if '"id":' in res.stdout:
-                success_count += 1
-                print(f"[{idx}/{len(ISSUES)}] Created issue: {title}")
+                created = True
             else:
                 print(f"[{idx}/{len(ISSUES)}] API Error: {res.stdout[:100]}")
         
         time.sleep(0.2)
 
-    print(f"\nDone! Created {success_count} / {len(ISSUES)} issues on {REPO}.")
+    print(f"\n==================================================")
+    print(f"Finished! Successfully created {success_count} / {len(ISSUES)} issues on {REPO}.")
+    if failed:
+        print(f"Failed issues ({len(failed)}): {failed}")
+    print(f"==================================================")
 
 if __name__ == "__main__":
     main()

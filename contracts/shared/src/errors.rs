@@ -106,15 +106,10 @@ pub enum ContractError {
     OracleAlreadyWhitelisted = 51,
     /// Too many markets were requested in one query
     TooManyMarkets = 52,
-    /// WASM hash for market contract has not been set by admin
+    /// Market wasm hash has not been configured yet
     WasmHashNotSet = 53,
-    /// Oracle address is not whitelisted
+    /// Oracle address is not on the factory whitelist
     OracleNotWhitelisted = 54,
-    /// Fighter names cannot be identical
-    DuplicateFighterName = 55,
-    /// fight_date does not satisfy the minimum market duration requirement
-    /// (fight_date must be > ledger_timestamp + MIN_MARKET_DURATION)
-    InvalidFightDate = 56,
 
     // ── Reentrancy ─────────────────────────────────────────
     /// A claim or refund transfer is already in progress

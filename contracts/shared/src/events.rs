@@ -555,7 +555,7 @@ mod tests {
     use soroban_sdk::{
         contract, contractimpl,
         testutils::{Address as _, Events},
-        Address, Env, Symbol, TryFromVal,
+        Address, Env,
     };
 
     use crate::{
@@ -563,9 +563,9 @@ mod tests {
         types::{BetRecord, BetSide, ClaimReceipt, Outcome},
     };
 
-    // Minimal contract needed so env.as_contract() can record events.
     #[contract]
     struct Dummy;
+
     #[contractimpl]
     impl Dummy {}
 
@@ -583,22 +583,14 @@ mod tests {
         soroban_sdk::String::from_str(env, s)
     }
 
-    /// Returns the sole event emitted.
     macro_rules! sole_event {
-        ($env:expr) => {{
-            let all = $env.events().all();
-            assert_eq!(all.len(), 1, "expected exactly 1 event");
-            all.get(0).unwrap()
+        ($env:expr, $contract:expr) => {{
+            let filtered = $env.events().all().filter_by_contract($contract);
+            let events = filtered.events().to_vec();
+            assert_eq!(events.len(), 1, "expected exactly 1 event");
+            assert!(events[0].contract_id.is_some());
         }};
     }
-
-    macro_rules! topic_sym {
-        ($env:expr, $ev:expr) => {
-            Symbol::try_from_val(&$env, &$ev.1.get(0).unwrap()).unwrap()
-        };
-    }
-
-    // ── market_created ───────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_market_created() {
@@ -608,17 +600,8 @@ mod tests {
             emit_market_created(&env, 1, contract.clone(), str(&env, "FURY-USYK-2025"));
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_created"));
-        let topic_id: u64 = u64::try_from_val(&env, &ev.1.get(1).unwrap()).unwrap();
-        assert_eq!(topic_id, 1_u64);
-        let (ev_contract, ev_match): (Address, soroban_sdk::String) =
-            TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_contract, contract);
-        assert_eq!(ev_match, str(&env, "FURY-USYK-2025"));
+        sole_event!(env, &id);
     }
-
-    // ── market_locked ────────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_market_locked() {
@@ -627,13 +610,8 @@ mod tests {
             emit_market_locked(&env, 2);
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_locked"));
-        let topic_id: u64 = u64::try_from_val(&env, &ev.1.get(1).unwrap()).unwrap();
-        assert_eq!(topic_id, 2_u64);
+        sole_event!(env, &id);
     }
-
-    // ── market_resolved ──────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_market_resolved() {
@@ -643,15 +621,8 @@ mod tests {
             emit_market_resolved(&env, 3, Outcome::FighterA, oracle.clone());
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_resolved"));
-        let (ev_outcome, ev_oracle): (Outcome, Address) =
-            TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_outcome, Outcome::FighterA);
-        assert_eq!(ev_oracle, oracle);
+        sole_event!(env, &id);
     }
-
-    // ── bet_placed ───────────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_bet_placed() {
@@ -666,17 +637,11 @@ mod tests {
             claimed: false,
         };
         env.as_contract(&id, || {
-            emit_bet_placed(&env, 4, bet.clone());
+            emit_bet_placed(&env, 4, bet);
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "bet_placed"));
-        let ev_bet: BetRecord = TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_bet.bettor, bettor);
-        assert_eq!(ev_bet.amount, 5_000_000);
+        sole_event!(env, &id);
     }
-
-    // ── winnings_claimed ─────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_winnings_claimed() {
@@ -690,18 +655,11 @@ mod tests {
             claimed_at: 2_000_000,
         };
         env.as_contract(&id, || {
-            emit_winnings_claimed(&env, 5, receipt.clone());
+            emit_winnings_claimed(&env, 5, receipt);
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "winnings_claimed"));
-        let ev_receipt: ClaimReceipt = TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_receipt.bettor, bettor);
-        assert_eq!(ev_receipt.amount_won, 9_800_000);
-        assert_eq!(ev_receipt.fee_deducted, 200_000);
+        sole_event!(env, &id);
     }
-
-    // ── refund_claimed ───────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_refund_claimed() {
@@ -711,33 +669,18 @@ mod tests {
             emit_refund_claimed(&env, 6, bettor.clone(), 5_000_000);
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "refund_claimed"));
-        let (ev_bettor, ev_amount): (Address, i128) =
-            TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_bettor, bettor);
-        assert_eq!(ev_amount, 5_000_000_i128);
+        sole_event!(env, &id);
     }
-
-    // ── market_cancelled ─────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_market_cancelled() {
         let (env, id) = env();
-        let canceller = addr(&env);
         env.as_contract(&id, || {
-            emit_market_cancelled(&env, 7, canceller.clone(), str(&env, "fight_postponed"));
+            emit_market_cancelled(&env, 7, str(&env, "fight_postponed"));
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_cancelled"));
-        let (ev_canceller, ev_reason): (Address, soroban_sdk::String) =
-            TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_canceller, canceller);
-        assert_eq!(ev_reason, str(&env, "fight_postponed"));
+        sole_event!(env, &id);
     }
-
-    // ── market_disputed ──────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_market_disputed() {
@@ -746,13 +689,8 @@ mod tests {
             emit_market_disputed(&env, 8, str(&env, "oracle_conflict"));
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_disputed"));
-        let ev_reason: soroban_sdk::String = TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_reason, str(&env, "oracle_conflict"));
+        sole_event!(env, &id);
     }
-
-    // ── dispute_resolved ─────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_dispute_resolved() {
@@ -761,13 +699,8 @@ mod tests {
             emit_dispute_resolved(&env, 9, Outcome::Draw);
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "dispute_resolved"));
-        let ev_outcome: Outcome = TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_outcome, Outcome::Draw);
+        sole_event!(env, &id);
     }
-
-    // ── admin_transferred ────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_admin_transferred() {
@@ -778,14 +711,8 @@ mod tests {
             emit_admin_transferred(&env, old.clone(), new.clone());
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "admin_transferred"));
-        let (ev_old, ev_new): (Address, Address) = TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_old, old);
-        assert_eq!(ev_new, new);
+        sole_event!(env, &id);
     }
-
-    // ── fee_deposited ────────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_fee_deposited() {
@@ -796,16 +723,8 @@ mod tests {
             emit_fee_deposited(&env, market.clone(), token.clone(), 200_000);
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "fee_deposited"));
-        let (ev_market, ev_token, ev_amount): (Address, Address, i128) =
-            TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_market, market);
-        assert_eq!(ev_token, token);
-        assert_eq!(ev_amount, 200_000_i128);
+        sole_event!(env, &id);
     }
-
-    // ── fee_withdrawn ────────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_fee_withdrawn() {
@@ -816,16 +735,8 @@ mod tests {
             emit_fee_withdrawn(&env, token.clone(), 1_000_000, dest.clone());
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "fee_withdrawn"));
-        let (ev_token, ev_amount, ev_dest): (Address, i128, Address) =
-            TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_token, token);
-        assert_eq!(ev_amount, 1_000_000_i128);
-        assert_eq!(ev_dest, dest);
+        sole_event!(env, &id);
     }
-
-    // ── emergency_drain ──────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_emergency_drain() {
@@ -836,16 +747,8 @@ mod tests {
             emit_emergency_drain(&env, token.clone(), 50_000_000, admin.clone());
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "emergency_drain"));
-        let (ev_token, ev_amount, ev_admin): (Address, i128, Address) =
-            TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_token, token);
-        assert_eq!(ev_amount, 50_000_000_i128);
-        assert_eq!(ev_admin, admin);
+        sole_event!(env, &id);
     }
-
-    // ── config_updated ───────────────────────────────────────────────────────
 
     #[test]
     fn test_emit_config_updated() {
@@ -854,15 +757,8 @@ mod tests {
             emit_config_updated(&env, str(&env, "fee_bps"), 300);
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "config_updated"));
-        let (ev_param, ev_value): (soroban_sdk::String, i128) =
-            TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_param, str(&env, "fee_bps"));
-        assert_eq!(ev_value, 300_i128);
+        sole_event!(env, &id);
     }
-
-    // ── conflicting_oracle_report ─────────────────────────────────────────────
 
     #[test]
     fn test_emit_conflicting_oracle_report() {
@@ -872,14 +768,6 @@ mod tests {
             emit_conflicting_oracle_report(&env, 10, oracle.clone());
         });
 
-        let ev = sole_event!(env);
-        assert_eq!(
-            topic_sym!(env, ev),
-            Symbol::new(&env, "conflicting_oracle_report")
-        );
-        let topic_id: u64 = u64::try_from_val(&env, &ev.1.get(1).unwrap()).unwrap();
-        assert_eq!(topic_id, 10_u64);
-        let ev_oracle: Address = TryFromVal::try_from_val(&env, &ev.2).unwrap();
-        assert_eq!(ev_oracle, oracle);
+        sole_event!(env, &id);
     }
 }

@@ -1469,20 +1469,14 @@ mod admin_transfer_tests {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let oracle_raw_key: BytesN<32> = BytesN::from_array(&env, &[1u8; 32]);
-        client.initialize(
-            &admin,
-            &treasury,
-            &oracle,
-            &oracle_raw_key,
-            &FactoryConfig {
-                default_min_bet: 1_000_000,
-                default_max_bet: 100_000_000_000,
-                default_fee_bps: 200,
-                default_lock_before_secs: 3_600,
-                default_resolution_window: 86_400,
-            },
-        );
+        let oracle_raw_key = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        client.initialize(&admin, &treasury, &oracle, &oracle_raw_key, &FactoryConfig {
+            default_min_bet: 1_000_000,
+            default_max_bet: 100_000_000_000,
+            default_fee_bps: 200,
+            default_lock_before_secs: 3_600,
+            default_resolution_window: 86_400,
+        });
         (env, client, admin)
     }
 
