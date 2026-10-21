@@ -658,6 +658,12 @@ impl Market {
             .and_then(|v| v.checked_add(amount_draw))
             .ok_or(ContractError::InsufficientAmount)?;
 
+        // Give callers a clear contract error before attempting the transfer.
+        let caller_balance = token::Client::new(&env, &token).balance(&provider);
+        if caller_balance < total_in {
+            return Err(ContractError::InsufficientSeedLiquidity);
+        }
+
         // Compute LP shares to mint
         let total_shares: i128 = env.storage().persistent()
             .get(&LP_TOTAL_SHARES)
@@ -1343,8 +1349,9 @@ impl Market {
             return Err(ContractError::MarketNotFound);
         }
 
-        // Must be unresolved (not Resolved, not Cancelled)
-        if state.status == MarketStatus::Resolved || state.status == MarketStatus::Cancelled {
+        // An oracle consensus result in cooldown must not be cancellable through
+        // the expiry path. Only genuinely open or locked markets can expire.
+        if state.status != MarketStatus::Open && state.status != MarketStatus::Locked {
             return Err(ContractError::InvalidMarketStatus);
         }
 
@@ -1366,6 +1373,7 @@ impl Market {
             .unwrap_or_else(|| Vec::new(&env));
 
         let token_opt: Option<Address> = env.storage().persistent().get(&TOKEN);
+        let mut total_refunded = 0i128;
 
         for bettor in bettor_list.iter() {
             let bets = Self::load_bets(&env, &bettor);
@@ -1381,6 +1389,7 @@ impl Market {
             Self::save_bets(&env, &bettor, &updated_bets);
 
             if bettor_refund > 0 {
+                total_refunded = total_refunded.saturating_add(bettor_refund);
                 if let Some(ref token) = token_opt {
                     let token_client = token::Client::new(&env, token);
                     token_client.transfer(&env.current_contract_address(), &bettor, &bettor_refund);
@@ -1392,6 +1401,7 @@ impl Market {
         // ── CLEANUP ───────────────────────────────────────────────────────────
         env.storage().instance().set(&CLAIMING, &false);
         Self::extend_market_ttl(&env);
+        boxmeout_shared::emit_market_expired_refunded(&env, state.market_id, total_refunded);
 
         Ok(())
     }

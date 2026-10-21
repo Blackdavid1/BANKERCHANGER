@@ -219,7 +219,7 @@ fn test_withdraw_below_reserve_fails() {
     );
     assert_eq!(
         result.unwrap_err(),
-        Ok(ContractError::InsufficientReserve)
+        Ok(ContractError::ReserveFloorBreached)
     );
 }
 
@@ -240,6 +240,22 @@ fn test_withdraw_leaving_exactly_reserve_succeeds() {
         1_000_000_000_i128,
         "balance after withdrawal should equal the reserve"
     );
+}
+
+#[test]
+fn competing_withdrawals_cannot_both_consume_reserved_fees() {
+    let (env, client, admin, _market, token) = funded_treasury(5_000_000_000);
+    client.set_minimum_reserve(&admin, &1_000_000_000);
+    let first_destination = Address::generate(&env);
+    let second_destination = Address::generate(&env);
+
+    // Model two withdrawals submitted against the same starting balance. Once
+    // the first reserves and transfers its amount, the second must re-check the
+    // updated accounting before it can pass the reserve floor.
+    client.withdraw_fees(&admin, &token, &3_000_000_000, &first_destination);
+    let second = client.try_withdraw_fees(&admin, &token, &1_100_000_000, &second_destination);
+    assert_eq!(second.unwrap_err(), Ok(ContractError::ReserveFloorBreached));
+    assert_eq!(client.get_accumulated_fees(&token), 2_000_000_000);
 }
 
 #[test]

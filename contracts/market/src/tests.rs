@@ -6532,7 +6532,6 @@ mod task14_contract_integrity_and_safety_tests {
     }
 }
 
-
         let factory = Address::generate(&env);
         let treasury = Address::generate(&env);
         let contract_id = env.register_contract(None, Market);
@@ -9099,6 +9098,94 @@ mod issue_631_to_634_tests {
         let half_max = i128::MAX / 2;
         let res = boxmeout_shared::math::calculate_payout(half_max, 3, 1);
         assert_eq!(res.unwrap_err(), ContractError::ArithmeticOverflow);
+    }
+}
+
+#[cfg(test)]
+mod issue_859_858_regression_tests {
+    use crate::{Market, MarketClient};
+    use boxmeout_shared::{
+        errors::ContractError,
+        types::{FightDetails, MarketConfig, MarketState, MarketStatus},
+    };
+    use soroban_sdk::{
+        testutils::{Address as _, Events, LedgerInfo},
+        Address, Env, String, Symbol, TryFromVal,
+    };
+
+    fn initialized_market(env: &Env) -> (MarketClient<'static>, Address) {
+        env.mock_all_auths();
+        let id = env.register_contract(None, Market);
+        let client = MarketClient::new(env, &id);
+        let factory = Address::generate(env);
+        let fight = FightDetails {
+            match_id: String::from_str(env, "ISSUE-859"),
+            fighter_a: String::from_str(env, "A"),
+            fighter_b: String::from_str(env, "B"),
+            weight_class: String::from_str(env, "Open"),
+            scheduled_at: 1,
+            venue: String::from_str(env, "Test"),
+            title_fight: false,
+        };
+        let config = MarketConfig {
+            min_bet_amount: 1,
+            max_bet: 1_000_000_000,
+            max_bet_share_bps: 10_000,
+            fee_bps: 0,
+            lock_before_secs: 0,
+            resolution_window: 86_400,
+            tier: 0,
+            dispute_cooldown_ledgers: 10,
+        };
+        client.initialize(&factory, &1, &fight, &config, &factory, &0);
+        (client, id)
+    }
+
+    #[test]
+    fn zero_balance_seed_deposit_returns_clear_error() {
+        let env = Env::default();
+        let (client, _) = initialized_market(&env);
+        let provider = Address::generate(&env);
+        let token = env.register_stellar_asset_contract(provider.clone());
+        let result = client.try_add_liquidity(
+            &provider, &10_000_000, &10_000_000, &10_000_000, &token, &0,
+        );
+        assert_eq!(result.unwrap_err(), Ok(ContractError::InsufficientSeedLiquidity));
+    }
+
+    #[test]
+    fn expiry_refund_is_blocked_during_resolution_cooldown() {
+        let env = Env::default();
+        let (client, contract_id) = initialized_market(&env);
+        env.as_contract(&contract_id, || {
+            let mut state: MarketState = env.storage().persistent().get(&"STATE").unwrap();
+            state.status = MarketStatus::ResolutionPending;
+            env.storage().persistent().set(&"STATE", &state);
+        });
+        let result = client.try_refund_expired(&1);
+        assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidMarketStatus));
+    }
+
+    #[test]
+    fn successful_expiry_refund_emits_aggregate_event() {
+        let env = Env::default();
+        let (client, _) = initialized_market(&env);
+        env.ledger().set(LedgerInfo {
+            timestamp: 86_402,
+            protocol_version: 22,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+        client.refund_expired(&1);
+        let event = env.events().all().last().unwrap();
+        let topic: Symbol = TryFromVal::try_from_val(&env, &event.1.get(0).unwrap()).unwrap();
+        assert_eq!(topic, Symbol::new(&env, "market_expired_refunded"));
+        let total_refunded: i128 = TryFromVal::try_from_val(&env, &event.2).unwrap();
+        assert_eq!(total_refunded, 0);
     }
 }
 

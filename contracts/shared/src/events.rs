@@ -153,6 +153,12 @@ pub fn emit_market_expired_refund(env: &Env, market_id: u64, bettor: Address, am
     env.events().publish(topics, (bettor, amount));
 }
 
+/// Emits the aggregate amount refunded after an expired market is cancelled.
+pub fn emit_market_expired_refunded(env: &Env, market_id: u64, total_refunded: i128) {
+    let topics = (Symbol::new(env, "market_expired_refunded"), market_id);
+    env.events().publish(topics, total_refunded);
+}
+
 /// Emits a `market_disputed` event when a resolved market is placed under review.
 ///
 /// Topics: `(Symbol("market_disputed"), market_id)`
@@ -189,6 +195,35 @@ pub fn emit_admin_proposed(env: &Env, current_admin: Address, proposed_admin: Ad
 pub fn emit_admin_transferred(env: &Env, old_admin: Address, new_admin: Address) {
     let topics = (Symbol::new(env, "admin_transferred"),);
     env.events().publish(topics, (old_admin, new_admin));
+}
+
+/// Emits the previous and new admin timelock values.
+pub fn emit_admin_timelock_updated(env: &Env, old_timelock: u64, new_timelock: u64) {
+    env.events().publish(
+        (Symbol::new(env, "admin_timelock_updated"),),
+        (old_timelock, new_timelock),
+    );
+}
+
+/// Emits a proposed admin transfer together with its unlock time.
+pub fn emit_admin_transfer_proposed(
+    env: &Env,
+    current_admin: Address,
+    pending_admin: Address,
+    unlock_time: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "admin_transfer_proposed"),),
+        (current_admin, pending_admin, unlock_time),
+    );
+}
+
+/// Emits the completed admin transfer.
+pub fn emit_admin_transfer_accepted(env: &Env, old_admin: Address, new_admin: Address) {
+    env.events().publish(
+        (Symbol::new(env, "admin_transfer_accepted"),),
+        (old_admin, new_admin),
+    );
 }
 
 /// Emits a `fee_deposited` event when a market deposits fees into the treasury.

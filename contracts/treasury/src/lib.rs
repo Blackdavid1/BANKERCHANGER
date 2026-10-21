@@ -352,7 +352,7 @@ impl Treasury {
             .unwrap_or(DEFAULT_MINIMUM_RESERVE);
         if current - amount < min_reserve {
             Self::release_fee_lock(&env);
-            return Err(ContractError::InsufficientReserve);
+            return Err(ContractError::ReserveFloorBreached);
         }
 
         fees.set(token.clone(), current - amount);
@@ -362,13 +362,12 @@ impl Treasury {
             Self::record_token_withdrawal(&env, &token, bucket, amount);
         }
 
-        Self::release_fee_lock(&env);
-
         token::Client::new(&env, &token).transfer(
             &env.current_contract_address(),
             &destination,
             &amount,
         );
+        Self::release_fee_lock(&env);
 
         Self::record_audit(
             &env,

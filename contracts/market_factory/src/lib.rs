@@ -538,7 +538,10 @@ impl MarketFactory {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        let old_timelock: u64 = env.storage().persistent().get(&ADMIN_TIMELOCK)
+            .unwrap_or(DEFAULT_ADMIN_TIMELOCK_SECS);
         env.storage().persistent().set(&ADMIN_TIMELOCK, &timelock_secs);
+        boxmeout_shared::emit_admin_timelock_updated(&env, old_timelock, timelock_secs);
         Ok(())
     }
 
@@ -592,7 +595,8 @@ impl MarketFactory {
         env.storage()
             .persistent()
             .set(&PENDING_ADMIN_EXPIRY, &expiry);
-        boxmeout_shared::emit_admin_proposed(&env, current_admin, new_admin);
+        boxmeout_shared::emit_admin_proposed(&env, current_admin.clone(), new_admin.clone());
+        boxmeout_shared::emit_admin_transfer_proposed(&env, current_admin, new_admin, unlock_at);
         Ok(())
     }
 
@@ -651,7 +655,8 @@ impl MarketFactory {
         env.storage().persistent().remove(&PENDING_ADMIN_UNLOCK);
         env.storage().persistent().remove(&PENDING_ADMIN_EXPIRY);
 
-        boxmeout_shared::emit_admin_transferred(&env, old_admin, new_admin);
+        boxmeout_shared::emit_admin_transferred(&env, old_admin.clone(), new_admin.clone());
+        boxmeout_shared::emit_admin_transfer_accepted(&env, old_admin, new_admin);
         Ok(())
     }
 
@@ -1950,5 +1955,44 @@ mod task12_factory_market_integrity_tests {
         // Refund expired on nonexistent market returns MarketNotFound
         let err_refund = client.try_refund_expired(&999u64);
         assert_eq!(err_refund.unwrap_err(), Ok(ContractError::MarketNotFound));
+    }
+
+    #[test]
+    fn governance_events_include_timelock_and_transfer_payloads() {
+        use soroban_sdk::{testutils::{Events, LedgerInfo}, Symbol, TryFromVal};
+        let env = Env::default();
+        let (client, admin, _treasury, _oracle) = setup_factory(&env);
+        let old_timelock = client.get_admin_timelock();
+        client.set_admin_timelock(&admin, &3_600);
+        let event = env.events().all().last().unwrap();
+        let topic: Symbol = TryFromVal::try_from_val(&env, &event.1.get(0).unwrap()).unwrap();
+        assert_eq!(topic, Symbol::new(&env, "admin_timelock_updated"));
+        let payload: (u64, u64) = TryFromVal::try_from_val(&env, &event.2).unwrap();
+        assert_eq!(payload, (old_timelock, 3_600));
+
+        let nominee = Address::generate(&env);
+        client.propose_admin(&admin, &nominee);
+        let event = env.events().all().last().unwrap();
+        let topic: Symbol = TryFromVal::try_from_val(&env, &event.1.get(0).unwrap()).unwrap();
+        assert_eq!(topic, Symbol::new(&env, "admin_transfer_proposed"));
+        let payload: (Address, Address, u64) = TryFromVal::try_from_val(&env, &event.2).unwrap();
+        assert_eq!(payload, (admin.clone(), nominee.clone(), 53_600));
+
+        env.ledger().set(LedgerInfo {
+            timestamp: 53_600,
+            protocol_version: 22,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+        client.accept_admin(&nominee);
+        let event = env.events().all().last().unwrap();
+        let topic: Symbol = TryFromVal::try_from_val(&env, &event.1.get(0).unwrap()).unwrap();
+        assert_eq!(topic, Symbol::new(&env, "admin_transfer_accepted"));
+        let payload: (Address, Address) = TryFromVal::try_from_val(&env, &event.2).unwrap();
+        assert_eq!(payload, (admin, nominee));
     }
 }
